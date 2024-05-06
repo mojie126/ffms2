@@ -196,6 +196,61 @@ FFMS_Frame *FFMS_VideoSource::OutputFrame(AVFrame *Frame) {
     return &LocalFrame;
 }
 
+// 检测CUDA是否可用
+bool isCudaAvailable() {
+    const AVHWDeviceType type = av_hwdevice_find_type_by_name("cuda");
+    return type != AV_HWDEVICE_TYPE_NONE;
+}
+
+// 检测QSV是否可用
+bool isQsvAvailable() {
+    const AVHWDeviceType type = av_hwdevice_find_type_by_name("qsv");
+    return type != AV_HWDEVICE_TYPE_NONE;
+}
+
+// 获取解码器
+const AVCodec *getDecoder(const bool use_cuda, const bool use_qsv, const AVCodecID codec_id) {
+    auto decoder = "h264";
+    if (use_cuda) {
+        if (codec_id == AV_CODEC_ID_HEVC) {
+            decoder = "hevc_cuvid";
+        } else if (codec_id == AV_CODEC_ID_H264) {
+            decoder = "h264_cuvid";
+        } else if (codec_id == AV_CODEC_ID_VC1) {
+            decoder = "vc1_cuvid";
+        }
+        const AVCodec *dec = avcodec_find_decoder_by_name(decoder);
+        if (dec != nullptr)
+            return dec;
+    }
+    if (use_qsv) {
+        if (codec_id == AV_CODEC_ID_HEVC) {
+            decoder = "hevc_qsv";
+        } else if (codec_id == AV_CODEC_ID_H264) {
+            decoder = "h264_qsv";
+        } else if (codec_id == AV_CODEC_ID_VC1) {
+            decoder = "vc1_qsv";
+        }
+        const AVCodec *dec = avcodec_find_decoder_by_name(decoder);
+        if (dec != nullptr)
+            return dec;
+    }
+    if (codec_id == AV_CODEC_ID_HEVC)
+        decoder = "hevc";
+    else if (codec_id == AV_CODEC_ID_VC1)
+        decoder = "vc1";
+    return avcodec_find_decoder_by_name(decoder);
+}
+
+// 获取硬件上下文类型
+AVHWDeviceType getHwDeviceType(const bool use_cuda, const bool use_qsv) {
+    if (use_cuda)
+        return av_hwdevice_find_type_by_name("cuda");
+    if (use_qsv)
+        return av_hwdevice_find_type_by_name("qsv");
+    return AV_HWDEVICE_TYPE_NONE;
+}
+
 FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, int Track, int Threads, int SeekMode)
     : Index(Index), SeekMode(SeekMode) {
 
@@ -239,7 +294,12 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
 
         LAVFOpenFile(SourceFile, FormatContext, VideoTrack, Index.LAVFOpts);
 
-        auto *Codec = avcodec_find_decoder(FormatContext->streams[VideoTrack]->codecpar->codec_id);
+        const bool use_cuda = isCudaAvailable();
+        const bool use_qsv = isQsvAvailable();
+        const auto *Codec = getDecoder(use_cuda, use_qsv, FormatContext->streams[VideoTrack]->codecpar->codec_id);
+        //auto *Codec = avcodec_find_decoder(FormatContext->streams[VideoTrack]->codecpar->codec_id);
+        std::cout << Codec->name << std::endl;
+
         if (Codec == nullptr)
             throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
                 "Video codec not found");
