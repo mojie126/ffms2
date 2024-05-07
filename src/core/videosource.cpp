@@ -22,6 +22,7 @@
 #include "indexing.h"
 #include "videoutils.h"
 #include <algorithm>
+#include <iostream>
 #include <thread>
 
 
