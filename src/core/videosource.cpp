@@ -203,16 +203,23 @@ bool isCudaAvailable() {
     return type != AV_HWDEVICE_TYPE_NONE;
 }
 
-// 检测QSV是否可用
-bool isQsvAvailable() {
-    const AVHWDeviceType type = av_hwdevice_find_type_by_name("qsv");
+// 检测D3D11VA是否可用
+bool isD3d11vaAvailable() {
+    const AVHWDeviceType type = av_hwdevice_find_type_by_name("d3d11va");
+    return type != AV_HWDEVICE_TYPE_NONE;
+}
+
+// 检测DXVA2是否可用
+bool isDxva2Available() {
+    const AVHWDeviceType type = av_hwdevice_find_type_by_name("dxva2");
     return type != AV_HWDEVICE_TYPE_NONE;
 }
 
 // 获取解码器
-const AVCodec *getDecoder(const bool use_cuda, const bool use_qsv, const AVCodecID codec_id) {
-    auto decoder = "h264";
-    if (use_cuda) {
+const AVCodec *getDecoder(const AVCodecID codec_id) {
+    const bool use_cuda = !isCudaAvailable();
+    if (use_cuda && codec_id != AV_CODEC_ID_AV1) {
+        const char *decoder = nullptr;
         if (codec_id == AV_CODEC_ID_HEVC) {
             decoder = "hevc_cuvid";
         } else if (codec_id == AV_CODEC_ID_H264) {
@@ -220,36 +227,47 @@ const AVCodec *getDecoder(const bool use_cuda, const bool use_qsv, const AVCodec
         } else if (codec_id == AV_CODEC_ID_VC1) {
             decoder = "vc1_cuvid";
         }
-        const AVCodec *dec = avcodec_find_decoder_by_name(decoder);
-        if (dec != nullptr)
-            return dec;
+        return avcodec_find_decoder_by_name(decoder);
     }
-    if (use_qsv) {
-        if (codec_id == AV_CODEC_ID_HEVC) {
-            decoder = "hevc_qsv";
-        } else if (codec_id == AV_CODEC_ID_H264) {
-            decoder = "h264_qsv";
-        } else if (codec_id == AV_CODEC_ID_VC1) {
-            decoder = "vc1_qsv";
-        }
-        const AVCodec *dec = avcodec_find_decoder_by_name(decoder);
-        if (dec != nullptr)
-            return dec;
-    }
-    if (codec_id == AV_CODEC_ID_HEVC)
-        decoder = "hevc";
-    else if (codec_id == AV_CODEC_ID_VC1)
-        decoder = "vc1";
-    return avcodec_find_decoder_by_name(decoder);
+    return avcodec_find_decoder(codec_id);
 }
 
 // 获取硬件上下文类型
-AVHWDeviceType getHwDeviceType(const bool use_cuda, const bool use_qsv) {
+AVHWDeviceType getHwDeviceType() {
+    const bool use_cuda = isCudaAvailable();
+    const bool use_dxva2 = isDxva2Available();
+    const bool use_d3d11va = isD3d11vaAvailable();
     if (use_cuda)
         return av_hwdevice_find_type_by_name("cuda");
-    if (use_qsv)
-        return av_hwdevice_find_type_by_name("qsv");
+    if (use_d3d11va)
+        return av_hwdevice_find_type_by_name("d3d11va");
+    if (use_dxva2)
+        return av_hwdevice_find_type_by_name("dxva2");
     return AV_HWDEVICE_TYPE_NONE;
+}
+
+static AVPixelFormat hw_pix_fmt;
+static AVBufferRef *hw_device_ctx = nullptr;
+
+static int hw_decoder_init(AVCodecContext *ctx, const AVHWDeviceType type) {
+    int err;
+    if ((err = av_hwdevice_ctx_create(&hw_device_ctx, type, nullptr, nullptr, 0)) < 0) {
+        fprintf(stderr, "Failed to create specified HW device.\n");
+        return err;
+    }
+    ctx->hw_device_ctx = av_buffer_ref(hw_device_ctx);
+    return err;
+}
+
+// 遍历 pix_fmts 数组，查找是否有与 hw_pix_fmt 相等的像素格式，如果找到则返回该像素格式
+static AVPixelFormat get_hw_format(AVCodecContext *ctx, const AVPixelFormat *pix_fmts) {
+    for (const AVPixelFormat *p = pix_fmts; *p != -1; p++) {
+        if (*p == hw_pix_fmt) {
+            return *p;
+        }
+    }
+    fprintf(stderr, "Failed to get HW surface format.\n");
+    return AV_PIX_FMT_NONE;
 }
 
 FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, int Track, int Threads, int SeekMode)
@@ -282,9 +300,10 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
 
         DecodeFrame = av_frame_alloc();
         LastDecodedFrame = av_frame_alloc();
+        HWDecodedFrame = av_frame_alloc();
         StashedPacket = av_packet_alloc();
 
-        if (!DecodeFrame || !LastDecodedFrame || !StashedPacket)
+        if (!DecodeFrame || !LastDecodedFrame || !HWDecodedFrame || !StashedPacket)
             throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED,
                 "Could not allocate dummy frame / stashed packet.");
 
@@ -295,33 +314,53 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
 
         LAVFOpenFile(SourceFile, FormatContext, VideoTrack, Index.LAVFOpts);
 
-        const bool use_cuda = isCudaAvailable();
-        const bool use_qsv = isQsvAvailable();
-        const auto *Codec = getDecoder(use_cuda, use_qsv, FormatContext->streams[VideoTrack]->codecpar->codec_id);
-        //auto *Codec = avcodec_find_decoder(FormatContext->streams[VideoTrack]->codecpar->codec_id);
-        std::cout << Codec->name << std::endl;
-
+        const AVCodec *Codec = getDecoder(FormatContext->streams[VideoTrack]->codecpar->codec_id);
         if (Codec == nullptr)
-            throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
-                "Video codec not found");
+            throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Video codec not found");
 
+        std::cout << Codec->name << std::endl;
+        FormatContext->flags = AV_CODEC_FLAG_LOW_DELAY;
+        FormatContext->max_analyze_duration = 1 * AV_TIME_BASE;
+        // 打开解码器
         CodecContext = avcodec_alloc_context3(Codec);
+
         if (CodecContext == nullptr)
-            throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED,
-                "Could not allocate video codec context.");
+            throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED, "Could not allocate video codec context.");
         if (avcodec_parameters_to_context(CodecContext, FormatContext->streams[VideoTrack]->codecpar) < 0)
-            throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
-                "Could not copy video decoder parameters.");
+            throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Could not copy video decoder parameters.");
+
+        // 初始化硬件
+        HWType = getHwDeviceType();
+        // HWType = av_hwdevice_find_type_by_name("d3d11va");
+        // HWType = av_hwdevice_find_type_by_name("dxva2");
+        if (HWType != AV_HWDEVICE_TYPE_NONE && HWType != AV_HWDEVICE_TYPE_CUDA) {
+            for (int i = 0;; i++) {
+                const AVCodecHWConfig *config = avcodec_get_hw_config(Codec, i);
+                if (!config)
+                    throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Decoder does not support device type");
+                if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX && config->device_type == HWType) {
+                    hw_pix_fmt = config->pix_fmt;
+                    break;
+                }
+            }
+            CodecContext->get_format = get_hw_format;
+            std::cout << "hw_pix_fmt: " << av_get_pix_fmt_name(hw_pix_fmt) << std::endl;
+            // 初始化硬件
+            if (hw_decoder_init(CodecContext, HWType) < 0)
+                throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Failed to create specified HW device");
+        }
+
         CodecContext->thread_count = DecodingThreads;
         CodecContext->has_b_frames = Frames.MaxBFrames;
-
         // Full explanation by more clever person availale here: https://github.com/Nevcairiel/LAVFilters/issues/113
         if (CodecContext->codec_id == AV_CODEC_ID_H264 && CodecContext->has_b_frames)
             CodecContext->has_b_frames = 15; // the maximum possible value for h264
 
         if (avcodec_open2(CodecContext, Codec, nullptr) < 0)
-            throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
-                "Could not open video codec");
+            throw FFMS_Exception(
+                FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
+                "Could not open video codec"
+            );
 
         // Similar yet different to h264 workaround above
         // vc1 simply sets has_b_frames to 1 no matter how many there are so instead we set it to the max value
@@ -553,8 +592,12 @@ void FFMS_VideoSource::SetInputFormat(int ColorSpace, int ColorRange, AVPixelFor
 }
 
 void FFMS_VideoSource::DetectInputFormat() {
+    // 关键，因为硬件像素格式传入肯定是NONE，所以不可以用解码器的设置的像素格式，需要用解码后的像素格式
     if (InputFormat == AV_PIX_FMT_NONE)
-        InputFormat = CodecContext->pix_fmt;
+        if (HWType == AV_HWDEVICE_TYPE_NONE)
+            InputFormat = CodecContext->pix_fmt;
+        else
+            InputFormat = static_cast<AVPixelFormat>(DecodeFrame->format);
 
     AVColorRange RangeFromFormat = handle_jpeg(&InputFormat);
 
@@ -629,7 +672,8 @@ void FFMS_VideoSource::ReAdjustOutputFormat(AVFrame *Frame) {
         SWS = GetSwsContext(
             Frame->width, Frame->height, InputFormat, InputColorSpace, InputColorRange,
             TargetWidth, TargetHeight, OutputFormat, OutputColorSpace, OutputColorRange,
-            TargetResizer);
+            TargetResizer
+        );
 
         if (!SWS) {
             ResetOutputFormat();
@@ -746,12 +790,18 @@ bool FFMS_VideoSource::DecodePacket(AVPacket *Packet) {
         Delay.Increment(PacketHidden, SecondField);
     }
 
-    Ret = avcodec_receive_frame(CodecContext, DecodeFrame);
+    Ret = avcodec_receive_frame(CodecContext, HWDecodedFrame);
     if (Ret == 0) {
+        if (CodecContext->hw_device_ctx && HWDecodedFrame->format == hw_pix_fmt) {
+            //关键，硬件帧需要用GPU内存复制到CPU内存
+            if (av_hwframe_transfer_data(DecodeFrame, HWDecodedFrame, 0) == 0) {
+                std::cout << "DecodeFrame: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(DecodeFrame->format)) << std::endl;
+                std::cout << "HWDecodedFrame: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(HWDecodedFrame->format)) << std::endl;
+            }
+        }
         Delay.Decrement();
-    } else {
+    } else
         std::swap(DecodeFrame, LastDecodedFrame);
-    }
 
     if (Ret == 0 && Stage == DecodeStage::INITIALIZE)
         Stage = DecodeStage::APPLY_DELAY;
@@ -798,6 +848,7 @@ void FFMS_VideoSource::Free() {
     av_freep(&SWSFrameData[0]);
     av_frame_free(&DecodeFrame);
     av_frame_free(&LastDecodedFrame);
+    av_frame_free(&HWDecodedFrame);
     av_packet_free(&StashedPacket);
 }
 

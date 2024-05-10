@@ -107,6 +107,8 @@ private:
     size_t HDR10PlusBufferSize = 0;
     AVFrame *DecodeFrame = nullptr;
     AVFrame *LastDecodedFrame = nullptr;
+    AVFrame *HWDecodedFrame = nullptr;
+    AVHWDeviceType HWType;
     int LastFrameNum = 0;
     FFMS_Index &Index;
     FFMS_Track Frames;
