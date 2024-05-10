@@ -217,7 +217,7 @@ bool isDxva2Available() {
 
 // 获取解码器
 const AVCodec *getDecoder(const AVCodecID codec_id) {
-    const bool use_cuda = !isCudaAvailable();
+    const bool use_cuda = isCudaAvailable();
     if (use_cuda && codec_id != AV_CODEC_ID_AV1) {
         const char *decoder = nullptr;
         if (codec_id == AV_CODEC_ID_HEVC) {
@@ -594,10 +594,12 @@ void FFMS_VideoSource::SetInputFormat(int ColorSpace, int ColorRange, AVPixelFor
 void FFMS_VideoSource::DetectInputFormat() {
     // 关键，因为硬件像素格式传入肯定是NONE，所以不可以用解码器的设置的像素格式，需要用解码后的像素格式
     if (InputFormat == AV_PIX_FMT_NONE)
-        if (HWType == AV_HWDEVICE_TYPE_NONE)
+        if (HWType == AV_HWDEVICE_TYPE_NONE || HWType == AV_HWDEVICE_TYPE_CUDA) {
             InputFormat = CodecContext->pix_fmt;
-        else
+        } else {
+            // D3D11VA和DXVA2使用解码
             InputFormat = static_cast<AVPixelFormat>(DecodeFrame->format);
+        }
 
     AVColorRange RangeFromFormat = handle_jpeg(&InputFormat);
 
@@ -790,7 +792,11 @@ bool FFMS_VideoSource::DecodePacket(AVPacket *Packet) {
         Delay.Increment(PacketHidden, SecondField);
     }
 
-    Ret = avcodec_receive_frame(CodecContext, HWDecodedFrame);
+    if (HWType == AV_HWDEVICE_TYPE_NONE || HWType == AV_HWDEVICE_TYPE_CUDA) {
+        Ret = avcodec_receive_frame(CodecContext, DecodeFrame);
+    } else {
+        Ret = avcodec_receive_frame(CodecContext, HWDecodedFrame);
+    }
     if (Ret == 0) {
         if (CodecContext->hw_device_ctx && HWDecodedFrame->format == hw_pix_fmt) {
             //关键，硬件帧需要用GPU内存复制到CPU内存
