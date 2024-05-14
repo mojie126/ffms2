@@ -23,8 +23,8 @@
 #include "videoutils.h"
 #include <algorithm>
 #include <iostream>
+#include <fstream>
 #include <thread>
-
 
 void DecoderDelay::Reset() {
     ThreadDelayCounter = 0;
@@ -197,28 +197,20 @@ FFMS_Frame *FFMS_VideoSource::OutputFrame(AVFrame *Frame) {
     return &LocalFrame;
 }
 
-// 检测CUDA是否可用
-bool isCudaAvailable() {
-    const AVHWDeviceType type = av_hwdevice_find_type_by_name("cuda");
-    return type != AV_HWDEVICE_TYPE_NONE;
-}
-
-// 检测D3D11VA是否可用
-bool isD3d11vaAvailable() {
-    const AVHWDeviceType type = av_hwdevice_find_type_by_name("d3d11va");
-    return type != AV_HWDEVICE_TYPE_NONE;
-}
-
-// 检测DXVA2是否可用
-bool isDxva2Available() {
-    const AVHWDeviceType type = av_hwdevice_find_type_by_name("dxva2");
-    return type != AV_HWDEVICE_TYPE_NONE;
+// 获取硬件上下文类型
+AVHWDeviceType getHwDeviceType(const bool skip_cuda = false) {
+    if (av_hwdevice_find_type_by_name("cuda") == AV_HWDEVICE_TYPE_CUDA && skip_cuda == false)
+        return AV_HWDEVICE_TYPE_CUDA;
+    if (av_hwdevice_find_type_by_name("d3d11va") == AV_HWDEVICE_TYPE_D3D11VA)
+        return AV_HWDEVICE_TYPE_D3D11VA;
+    if (av_hwdevice_find_type_by_name("dxva2") == AV_HWDEVICE_TYPE_DXVA2)
+        return AV_HWDEVICE_TYPE_DXVA2;
+    return AV_HWDEVICE_TYPE_NONE;
 }
 
 // 获取解码器
-const AVCodec *getDecoder(const AVCodecID codec_id) {
-    const bool use_cuda = isCudaAvailable();
-    if (use_cuda && codec_id != AV_CODEC_ID_AV1) {
+const AVCodec *getDecoder(const AVCodecID codec_id, const AVHWDeviceType hw_type) {
+    if (hw_type == AV_HWDEVICE_TYPE_CUDA && codec_id != AV_CODEC_ID_AV1) {
         const char *decoder = nullptr;
         if (codec_id == AV_CODEC_ID_HEVC) {
             decoder = "hevc_cuvid";
@@ -230,20 +222,6 @@ const AVCodec *getDecoder(const AVCodecID codec_id) {
         return avcodec_find_decoder_by_name(decoder);
     }
     return avcodec_find_decoder(codec_id);
-}
-
-// 获取硬件上下文类型
-AVHWDeviceType getHwDeviceType() {
-    const bool use_cuda = isCudaAvailable();
-    const bool use_dxva2 = isDxva2Available();
-    const bool use_d3d11va = isD3d11vaAvailable();
-    if (use_cuda)
-        return av_hwdevice_find_type_by_name("cuda");
-    if (use_d3d11va)
-        return av_hwdevice_find_type_by_name("d3d11va");
-    if (use_dxva2)
-        return av_hwdevice_find_type_by_name("dxva2");
-    return AV_HWDEVICE_TYPE_NONE;
 }
 
 static AVPixelFormat hw_pix_fmt;
@@ -314,11 +292,19 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
 
         LAVFOpenFile(SourceFile, FormatContext, VideoTrack, Index.LAVFOpts);
 
-        const AVCodec *Codec = getDecoder(FormatContext->streams[VideoTrack]->codecpar->codec_id);
+        // 初始化硬件
+        // HWType = getHwDeviceType(true);
+        HWType = getHwDeviceType();
+        const AVCodec *Codec = getDecoder(FormatContext->streams[VideoTrack]->codecpar->codec_id, HWType);
         if (Codec == nullptr)
             throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Video codec not found");
 
-        std::cout << Codec->name << std::endl;
+        std::ofstream out;
+        out=std::ofstream("D:/Aegisub_HW.log", std::ios::binary);
+        out << "Codec: " << Codec->name << "\n" << std::flush;
+
+        std::cout << "Codec: " << Codec->name << std::endl;
+
         FormatContext->flags = AV_CODEC_FLAG_LOW_DELAY;
         FormatContext->max_analyze_duration = 1 * AV_TIME_BASE;
         // 打开解码器
@@ -329,11 +315,22 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         if (avcodec_parameters_to_context(CodecContext, FormatContext->streams[VideoTrack]->codecpar) < 0)
             throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Could not copy video decoder parameters.");
 
-        // 初始化硬件
-        HWType = getHwDeviceType();
         // HWType = av_hwdevice_find_type_by_name("d3d11va");
         // HWType = av_hwdevice_find_type_by_name("dxva2");
-        if (HWType != AV_HWDEVICE_TYPE_NONE && HWType != AV_HWDEVICE_TYPE_CUDA) {
+        if (HWType != AV_HWDEVICE_TYPE_NONE) {
+            if (CodecContext->codec_id != AV_CODEC_ID_AV1) {
+                std::cout << "HWType: " << av_hwdevice_get_type_name(HWType) << std::endl;
+                out << "HWType: " << av_hwdevice_get_type_name(HWType) << "\n" << std::flush;
+            } else {
+                std::cout << "HWType: AV1 decoder does not support device type" << std::endl;
+                out << "HWType: AV1 decoder does not support device type" << "\n" << std::flush;
+            }
+        } else {
+            std::cout << "HWType: none" << std::endl;
+            out << "HWType: none" << "\n" << std::flush;
+        }
+
+        if ((HWType == AV_HWDEVICE_TYPE_D3D11VA || HWType == AV_HWDEVICE_TYPE_DXVA2) && CodecContext->codec_id != AV_CODEC_ID_AV1) {
             for (int i = 0;; i++) {
                 const AVCodecHWConfig *config = avcodec_get_hw_config(Codec, i);
                 if (!config)
@@ -345,6 +342,7 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             }
             CodecContext->get_format = get_hw_format;
             std::cout << "hw_pix_fmt: " << av_get_pix_fmt_name(hw_pix_fmt) << std::endl;
+            out << "hw_pix_fmt: " << av_get_pix_fmt_name(hw_pix_fmt) << "\n" << std::flush;
             // 初始化硬件
             if (hw_decoder_init(CodecContext, HWType) < 0)
                 throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Failed to create specified HW device");
@@ -593,13 +591,13 @@ void FFMS_VideoSource::SetInputFormat(int ColorSpace, int ColorRange, AVPixelFor
 
 void FFMS_VideoSource::DetectInputFormat() {
     // 关键，因为硬件像素格式传入肯定是NONE，所以不可以用解码器的设置的像素格式，需要用解码后的像素格式
-    if (InputFormat == AV_PIX_FMT_NONE)
-        if (HWType == AV_HWDEVICE_TYPE_NONE || HWType == AV_HWDEVICE_TYPE_CUDA) {
+    if (InputFormat == AV_PIX_FMT_NONE) {
+        if (HWType == AV_HWDEVICE_TYPE_NONE || HWType == AV_HWDEVICE_TYPE_CUDA || CodecContext->codec_id == AV_CODEC_ID_AV1) {
             InputFormat = CodecContext->pix_fmt;
-        } else {
-            // D3D11VA和DXVA2使用解码
+        } else if (HWType == AV_HWDEVICE_TYPE_D3D11VA || HWType == AV_HWDEVICE_TYPE_DXVA2) {
             InputFormat = static_cast<AVPixelFormat>(DecodeFrame->format);
         }
+    }
 
     AVColorRange RangeFromFormat = handle_jpeg(&InputFormat);
 
@@ -792,7 +790,7 @@ bool FFMS_VideoSource::DecodePacket(AVPacket *Packet) {
         Delay.Increment(PacketHidden, SecondField);
     }
 
-    if (HWType == AV_HWDEVICE_TYPE_NONE || HWType == AV_HWDEVICE_TYPE_CUDA) {
+    if (HWType == AV_HWDEVICE_TYPE_NONE || HWType == AV_HWDEVICE_TYPE_CUDA || CodecContext->codec_id == AV_CODEC_ID_AV1) {
         Ret = avcodec_receive_frame(CodecContext, DecodeFrame);
     } else {
         Ret = avcodec_receive_frame(CodecContext, HWDecodedFrame);
@@ -801,8 +799,8 @@ bool FFMS_VideoSource::DecodePacket(AVPacket *Packet) {
         if (CodecContext->hw_device_ctx && HWDecodedFrame->format == hw_pix_fmt) {
             //关键，硬件帧需要用GPU内存复制到CPU内存
             if (av_hwframe_transfer_data(DecodeFrame, HWDecodedFrame, 0) == 0) {
-                std::cout << "DecodeFrame: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(DecodeFrame->format)) << std::endl;
-                std::cout << "HWDecodedFrame: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(HWDecodedFrame->format)) << std::endl;
+                // std::cout << "DecodeFrame: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(DecodeFrame->format)) << std::endl;
+                // std::cout << "HWDecodedFrame: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(HWDecodedFrame->format)) << std::endl;
             }
         }
         Delay.Decrement();
