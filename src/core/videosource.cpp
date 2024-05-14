@@ -251,7 +251,7 @@ static AVPixelFormat get_hw_format(AVCodecContext *ctx, const AVPixelFormat *pix
     return AV_PIX_FMT_NONE;
 }
 
-FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, int Track, int Threads, int SeekMode, const char *hw_name = nullptr)
+FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, int Track, int Threads, int SeekMode, const char *hw_name)
     : Index(Index), SeekMode(SeekMode) {
     try {
         if (Track < 0 || Track >= static_cast<int>(Index.size()))
