@@ -366,6 +366,8 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             if (hw_decoder_init(CodecContext, HWType) < 0)
                 throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Failed to create specified HW device");
         }
+        std::cout << "=====================================\n" << std::endl;
+        out << "=====================================\n" << std::flush;
 
         CodecContext->thread_count = DecodingThreads;
         CodecContext->has_b_frames = Frames.MaxBFrames;
