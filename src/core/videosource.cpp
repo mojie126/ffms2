@@ -324,10 +324,13 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
 
         std::cout << "Codec: " << Codec->name << std::endl;
 
-        FormatContext->flags = AV_CODEC_FLAG_LOW_DELAY;
+        FormatContext->flags |= AV_CODEC_FLAG_LOW_DELAY;
+        FormatContext->flags |= AV_CODEC_FLAG_LOW_DELAY;
         FormatContext->max_analyze_duration = 1 * AV_TIME_BASE;
         // 打开解码器
         CodecContext = avcodec_alloc_context3(Codec);
+        CodecContext->flags |= AV_CODEC_FLAG_LOW_DELAY;
+        CodecContext->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
         if (CodecContext == nullptr)
             throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED, "Could not allocate video codec context.");
