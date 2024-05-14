@@ -131,7 +131,7 @@ private:
     void Free();
     static void SanityCheckFrameForData(AVFrame *Frame);
 public:
-    FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, int Track, int Threads, int SeekMode);
+    FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, int Track, int Threads, int SeekMode, const char *hw_name);
     ~FFMS_VideoSource();
     const FFMS_VideoProperties& GetVideoProperties() { return VP; }
     FFMS_Track *GetTrack() { return &Frames; }

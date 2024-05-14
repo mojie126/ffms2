@@ -198,7 +198,10 @@ FFMS_Frame *FFMS_VideoSource::OutputFrame(AVFrame *Frame) {
 }
 
 // 获取硬件上下文类型
-AVHWDeviceType getHwDeviceType(const bool skip_cuda = false) {
+AVHWDeviceType getHwDeviceType(const char *hw_name = nullptr, const bool skip_cuda = false) {
+    if (hw_name != nullptr)
+        return av_hwdevice_find_type_by_name(hw_name);
+
     if (av_hwdevice_find_type_by_name("cuda") == AV_HWDEVICE_TYPE_CUDA && skip_cuda == false)
         return AV_HWDEVICE_TYPE_CUDA;
     if (av_hwdevice_find_type_by_name("d3d11va") == AV_HWDEVICE_TYPE_D3D11VA)
@@ -248,25 +251,32 @@ static AVPixelFormat get_hw_format(AVCodecContext *ctx, const AVPixelFormat *pix
     return AV_PIX_FMT_NONE;
 }
 
-FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, int Track, int Threads, int SeekMode)
+FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, int Track, int Threads, int SeekMode, const char *hw_name = nullptr)
     : Index(Index), SeekMode(SeekMode) {
-
     try {
         if (Track < 0 || Track >= static_cast<int>(Index.size()))
-            throw FFMS_Exception(FFMS_ERROR_INDEX, FFMS_ERROR_INVALID_ARGUMENT,
-                "Out of bounds track index selected");
+            throw FFMS_Exception(
+                FFMS_ERROR_INDEX, FFMS_ERROR_INVALID_ARGUMENT,
+                "Out of bounds track index selected"
+            );
 
         if (Index[Track].TT != FFMS_TYPE_VIDEO)
-            throw FFMS_Exception(FFMS_ERROR_INDEX, FFMS_ERROR_INVALID_ARGUMENT,
-                "Not a video track");
+            throw FFMS_Exception(
+                FFMS_ERROR_INDEX, FFMS_ERROR_INVALID_ARGUMENT,
+                "Not a video track"
+            );
 
         if (Index[Track].empty())
-            throw FFMS_Exception(FFMS_ERROR_INDEX, FFMS_ERROR_INVALID_ARGUMENT,
-                "Video track contains no frames");
+            throw FFMS_Exception(
+                FFMS_ERROR_INDEX, FFMS_ERROR_INVALID_ARGUMENT,
+                "Video track contains no frames"
+            );
 
         if (!Index.CompareFileSignature(SourceFile))
-            throw FFMS_Exception(FFMS_ERROR_INDEX, FFMS_ERROR_FILE_MISMATCH,
-                "The index does not match the source file");
+            throw FFMS_Exception(
+                FFMS_ERROR_INDEX, FFMS_ERROR_FILE_MISMATCH,
+                "The index does not match the source file"
+            );
 
         Frames = Index[Track];
         VideoTrack = Track;
@@ -282,19 +292,25 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         StashedPacket = av_packet_alloc();
 
         if (!DecodeFrame || !LastDecodedFrame || !HWDecodedFrame || !StashedPacket)
-            throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED,
-                "Could not allocate dummy frame / stashed packet.");
+            throw FFMS_Exception(
+                FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED,
+                "Could not allocate dummy frame / stashed packet."
+            );
 
         // Dummy allocations so the unallocated case doesn't have to be handled later
         if (av_image_alloc(SWSFrameData, SWSFrameLinesize, 16, 16, AV_PIX_FMT_GRAY8, 4) < 0)
-            throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED,
-                "Could not allocate dummy frame.");
+            throw FFMS_Exception(
+                FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED,
+                "Could not allocate dummy frame."
+            );
 
         LAVFOpenFile(SourceFile, FormatContext, VideoTrack, Index.LAVFOpts);
 
         // 初始化硬件
+        if (hw_name == "none")
+            hw_name = nullptr;
         // HWType = getHwDeviceType(true);
-        HWType = getHwDeviceType();
+        HWType = getHwDeviceType(hw_name);
         const AVCodec *Codec = getDecoder(FormatContext->streams[VideoTrack]->codecpar->codec_id, HWType);
         if (Codec == nullptr)
             throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Video codec not found");
@@ -368,7 +384,7 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         // in order to not confuse our own delay guesses later
         // Doesn't affect actual vc1 reordering unlike h264
         if (CodecContext->codec_id == AV_CODEC_ID_VC1 && CodecContext->has_b_frames) {
-            Delay.ReorderDelay = 7;     // the maximum possible value for vc1
+            Delay.ReorderDelay = 7; // the maximum possible value for vc1
             Delay.ThreadDelay = CodecContext->thread_count - 1;
         } else if (CodecContext->codec_id == AV_CODEC_ID_AV1) {
             // libdav1d.c exports delay like this.
@@ -403,10 +419,10 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
                 TotalFrames++;
 
         if (TotalFrames >= 2) {
-            double PTSDiff = (double)(Frames.back().PTS - Frames.front().PTS);
-            double TD = (double)(Frames.TB.Den);
-            double TN = (double)(Frames.TB.Num);
-            VP.FPSDenominator = (unsigned int)(PTSDiff * TN / TD * 1000.0 / (TotalFrames - 1));
+            double PTSDiff = (double) (Frames.back().PTS - Frames.front().PTS);
+            double TD = (double) (Frames.TB.Den);
+            double TN = (double) (Frames.TB.Num);
+            VP.FPSDenominator = (unsigned int) (PTSDiff * TN / TD * 1000.0 / (TotalFrames - 1));
             VP.FPSNumerator = 1000000;
         } else if (TotalFrames == 1 && Frames.LastDuration > 0) {
             VP.FPSDenominator *= Frames.LastDuration;
@@ -427,11 +443,11 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
 
         for (int i = 0; i < FormatContext->streams[VideoTrack]->codecpar->nb_coded_side_data; i++) {
             if (FormatContext->streams[VideoTrack]->codecpar->coded_side_data[i].type == AV_PKT_DATA_STEREO3D) {
-                const AVStereo3D *StereoSideData = (const AVStereo3D *)FormatContext->streams[VideoTrack]->codecpar->coded_side_data[i].data;
+                const AVStereo3D *StereoSideData = (const AVStereo3D *) FormatContext->streams[VideoTrack]->codecpar->coded_side_data[i].data;
                 VP.Stereo3DType = StereoSideData->type;
                 VP.Stereo3DFlags = StereoSideData->flags;
             } else if (FormatContext->streams[VideoTrack]->codecpar->coded_side_data[i].type == AV_PKT_DATA_MASTERING_DISPLAY_METADATA) {
-                const AVMasteringDisplayMetadata *MasteringDisplay = (const AVMasteringDisplayMetadata *)FormatContext->streams[VideoTrack]->codecpar->coded_side_data[i].data;
+                const AVMasteringDisplayMetadata *MasteringDisplay = (const AVMasteringDisplayMetadata *) FormatContext->streams[VideoTrack]->codecpar->coded_side_data[i].data;
                 if (MasteringDisplay->has_primaries) {
                     VP.HasMasteringDisplayPrimaries = MasteringDisplay->has_primaries;
                     for (int i = 0; i < 3; i++) {
@@ -450,11 +466,11 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
                 VP.HasMasteringDisplayPrimaries = !!VP.MasteringDisplayPrimariesX[0] && !!VP.MasteringDisplayPrimariesY[0] &&
                                                   !!VP.MasteringDisplayPrimariesX[1] && !!VP.MasteringDisplayPrimariesY[1] &&
                                                   !!VP.MasteringDisplayPrimariesX[2] && !!VP.MasteringDisplayPrimariesY[2] &&
-                                                  !!VP.MasteringDisplayWhitePointX   && !!VP.MasteringDisplayWhitePointY;
+                                                  !!VP.MasteringDisplayWhitePointX && !!VP.MasteringDisplayWhitePointY;
                 /* MasteringDisplayMinLuminance can be 0 */
                 VP.HasMasteringDisplayLuminance = !!VP.MasteringDisplayMaxLuminance;
             } else if (FormatContext->streams[VideoTrack]->codecpar->coded_side_data[i].type == AV_PKT_DATA_CONTENT_LIGHT_LEVEL) {
-                const AVContentLightMetadata *ContentLightLevel = (const AVContentLightMetadata *)FormatContext->streams[VideoTrack]->codecpar->coded_side_data[i].data;
+                const AVContentLightMetadata *ContentLightLevel = (const AVContentLightMetadata *) FormatContext->streams[VideoTrack]->codecpar->coded_side_data[i].data;
 
                 VP.ContentLightLevelMax = ContentLightLevel->MaxCLL;
                 VP.ContentLightLevelAverage = ContentLightLevel->MaxFALL;
@@ -472,7 +488,7 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         if (RotationMatrixSrc) {
             int32_t RotationMatrix[9];
             memcpy(RotationMatrix, RotationMatrixSrc, sizeof(RotationMatrix));
-            int64_t det = (int64_t)RotationMatrix[0] * RotationMatrix[4] - (int64_t)RotationMatrix[1] * RotationMatrix[3];
+            int64_t det = (int64_t) RotationMatrix[0] * RotationMatrix[4] - (int64_t) RotationMatrix[1] * RotationMatrix[3];
             if (det < 0) {
                 /* Always assume an horizontal flip for simplicity, it can be changed later if rotation is 180. */
                 VP.Flip = 1;
@@ -504,8 +520,10 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
 
         if (SeekMode >= 0 && Frames.size() > 1) {
             if (Seek(0) < 0) {
-                throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
-                    "Video track is unseekable");
+                throw FFMS_Exception(
+                    FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
+                    "Video track is unseekable"
+                );
             }
         }
 

@@ -103,9 +103,9 @@ FFMS_API(void) FFMS_SetLogLevel(int Level) {
     av_log_set_level(Level);
 }
 
-FFMS_API(FFMS_VideoSource *) FFMS_CreateVideoSource(const char *SourceFile, int Track, FFMS_Index *Index, int Threads, int SeekMode, FFMS_ErrorInfo *ErrorInfo) {
+FFMS_API(FFMS_VideoSource *) FFMS_CreateVideoSource(const char *SourceFile, int Track, FFMS_Index *Index, int Threads, int SeekMode, FFMS_ErrorInfo *ErrorInfo, const char *hw_name = nullptr) {
     try {
-        return new FFMS_VideoSource(SourceFile, *Index, Track, Threads, SeekMode);
+        return new FFMS_VideoSource(SourceFile, *Index, Track, Threads, SeekMode, hw_name);
     } catch (FFMS_Exception &e) {
         e.CopyOut(ErrorInfo);
         return nullptr;
