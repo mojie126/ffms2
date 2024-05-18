@@ -128,7 +128,10 @@ typedef enum FFMS_Errors {
     FFMS_ERROR_CODEC,				// decoder error
     FFMS_ERROR_NOT_AVAILABLE,		// requested mode or operation unavailable in this binary
     FFMS_ERROR_FILE_MISMATCH,		// provided index does not match the file
-    FFMS_ERROR_USER					// problem exists between keyboard and chair
+    FFMS_ERROR_USER,				// problem exists between keyboard and chair
+
+    FFMS_ERROR_FILTER               // filter error
+
 } FFMS_Errors;
 
 typedef enum FFMS_SeekMode {
@@ -423,7 +426,7 @@ FFMS_API(void) FFMS_Deinit();
 FFMS_API(int) FFMS_GetVersion();
 FFMS_API(int) FFMS_GetLogLevel();
 FFMS_API(void) FFMS_SetLogLevel(int Level);
-FFMS_API(FFMS_VideoSource *) FFMS_CreateVideoSource(const char *SourceFile, int Track, FFMS_Index *Index, int Threads, int SeekMode, FFMS_ErrorInfo *ErrorInfo, const char *hw_name);
+FFMS_API(FFMS_VideoSource *) FFMS_CreateVideoSource(const char *SourceFile, int Track, FFMS_Index *Index, int Threads, int SeekMode, FFMS_ErrorInfo *ErrorInfo, const char *hw_name, uint32_t padding);
 FFMS_API(FFMS_AudioSource *) FFMS_CreateAudioSource(const char *SourceFile, int Track, FFMS_Index *Index, int DelayMode, FFMS_ErrorInfo *ErrorInfo);
 FFMS_API(FFMS_AudioSource *) FFMS_CreateAudioSource2(const char *SourceFile, int Track, FFMS_Index *Index, int DelayMode, int FillGaps, double DrcScale, FFMS_ErrorInfo *ErrorInfo);
 FFMS_API(void) FFMS_DestroyVideoSource(FFMS_VideoSource *V);

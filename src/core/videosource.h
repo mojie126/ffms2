@@ -22,16 +22,18 @@
 #define FFVIDEOSOURCE_H
 
 extern "C" {
-#include <libavformat/avformat.h>
-#include <libavcodec/avcodec.h>
-#include <libswscale/swscale.h>
-#include <libavutil/imgutils.h>
-#include <libavutil/stereo3d.h>
-#include <libavutil/display.h>
-#include <libavutil/mastering_display_metadata.h>
+    #include <libavfilter/buffersrc.h>
+    #include <libavfilter/avfilter.h>
+    #include <libavformat/avformat.h>
+    #include <libavcodec/avcodec.h>
+    #include <libswscale/swscale.h>
+    #include <libavutil/imgutils.h>
+    #include <libavutil/stereo3d.h>
+    #include <libavutil/display.h>
+    #include <libavutil/mastering_display_metadata.h>
 
-#include "ffmscompat.h"
-#include <libavutil/hdr_dynamic_metadata.h>
+    #include "ffmscompat.h"
+    #include <libavutil/hdr_dynamic_metadata.h>
 }
 
 #include <vector>
@@ -107,8 +109,16 @@ private:
     size_t HDR10PlusBufferSize = 0;
     AVFrame *DecodeFrame = nullptr;
     AVFrame *LastDecodedFrame = nullptr;
+
+    // 硬件加速相关
     AVFrame *HWDecodedFrame = nullptr;
     AVHWDeviceType HWType;
+    // 过滤器相关
+    AVFilterContext *buffersink_ctx = nullptr;
+    AVFilterContext *buffersrc_ctx = nullptr;
+    AVFilterGraph *filter_graph = nullptr;
+    bool use_pad_filter = false;
+
     int LastFrameNum = 0;
     FFMS_Index &Index;
     FFMS_Track Frames;
@@ -131,7 +141,7 @@ private:
     void Free();
     static void SanityCheckFrameForData(AVFrame *Frame);
 public:
-    FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, int Track, int Threads, int SeekMode, const char *hw_name);
+    FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, int Track, int Threads, int SeekMode, const char *hw_name, uint32_t padding);
     ~FFMS_VideoSource();
     const FFMS_VideoProperties& GetVideoProperties() { return VP; }
     FFMS_Track *GetTrack() { return &Frames; }

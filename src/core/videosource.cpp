@@ -251,7 +251,7 @@ static AVPixelFormat get_hw_format(AVCodecContext *ctx, const AVPixelFormat *pix
     return AV_PIX_FMT_NONE;
 }
 
-FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, int Track, int Threads, int SeekMode, const char *hw_name)
+FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, int Track, int Threads, int SeekMode, const char *hw_name, uint32_t padding)
     : Index(Index), SeekMode(SeekMode) {
     try {
         if (Track < 0 || Track >= static_cast<int>(Index.size()))
@@ -371,6 +371,94 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         }
         std::cout << "=====================================\n" << std::endl;
         out << "=====================================\n" << std::flush;
+
+        // 配置过滤器
+        if (padding != 0) {
+            use_pad_filter = true;
+            filter_graph = avfilter_graph_alloc();
+
+            if (!filter_graph) {
+                throw FFMS_Exception(
+                    FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
+                    "Could not allocate filter."
+                );
+            }
+
+            // 创建 buffer 滤镜，用于作为输入
+            const AVFilter *buffersrc = avfilter_get_by_name("buffer");
+            const AVFilter *buffersink = avfilter_get_by_name("buffersink");
+            AVStream *video_stream = FormatContext->streams[VideoTrack];
+            char args[512];
+            snprintf(
+                args, sizeof(args),
+                "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=%d/%d",
+                CodecContext->width, CodecContext->height, CodecContext->pix_fmt,
+                video_stream->time_base.num, video_stream->time_base.den,
+                CodecContext->sample_aspect_ratio.num, CodecContext->sample_aspect_ratio.den
+            );
+
+
+            // 创建 buffer 滤镜
+            if (avfilter_graph_create_filter(&buffersrc_ctx, buffersrc, "in", args, nullptr, filter_graph) < 0) {
+                throw FFMS_Exception(
+                    FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
+                    "Failed to create buffer filter."
+                );
+            }
+
+            // 创建 buffer sink 滤镜，用于作为输出
+            if (avfilter_graph_create_filter(&buffersink_ctx, buffersink, "out", nullptr, nullptr, filter_graph) < 0) {
+                throw FFMS_Exception(
+                    FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
+                    "Failed to create buffer sink filter."
+                );
+            }
+
+            // 设置 buffer sink 的像素格式
+            enum AVPixelFormat pix_fmts[] = { AV_PIX_FMT_YUV420P, AV_PIX_FMT_NONE };
+            if (av_opt_set_int_list(buffersink_ctx, "pix_fmts", pix_fmts, AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN) < 0) {
+                throw FFMS_Exception(
+                    FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
+                    "Failed to set output pixel format."
+                );
+            }
+
+            // 创建 pad 滤镜并添加到滤镜图表中
+            const AVFilter* pad = avfilter_get_by_name("pad");
+            AVFilterContext* pad_ctx;
+            char pad_args[512];
+            snprintf(pad_args, sizeof(pad_args), "width=%d:height=%d:x=0:y=%d:color=black", CodecContext->width, CodecContext->height + padding * 2, padding);
+
+            if (avfilter_graph_create_filter(&pad_ctx, pad, "pad", pad_args, nullptr, filter_graph) < 0) {
+                throw FFMS_Exception(
+                    FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
+                    "Failed to create pad filter."
+                );
+            }
+
+            // 连接各个滤镜
+            if (avfilter_link(buffersrc_ctx, 0, pad_ctx, 0) < 0) {
+                throw FFMS_Exception(
+                    FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
+                    "Failed to connect buffersrc and pad."
+                );
+            }
+
+            if (avfilter_link(pad_ctx, 0, buffersink_ctx, 0) < 0) {
+                throw FFMS_Exception(
+                    FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
+                    "Failed to connect pad and buffersink."
+                );
+            }
+
+            // 配置滤镜图表
+            if (avfilter_graph_config(filter_graph, nullptr) < 0) {
+                throw FFMS_Exception(
+                    FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
+                    "Failed to configure filter."
+                );
+            }
+        }
 
         CodecContext->thread_count = DecodingThreads;
         CodecContext->has_b_frames = Frames.MaxBFrames;
@@ -825,6 +913,14 @@ bool FFMS_VideoSource::DecodePacket(AVPacket *Packet) {
         if (CodecContext->hw_device_ctx && HWDecodedFrame->format == hw_pix_fmt) {
             //关键，硬件帧需要用GPU内存复制到CPU内存
             if (av_hwframe_transfer_data(DecodeFrame, HWDecodedFrame, 0) == 0) {
+                if (use_pad_filter)
+                    // 向滤镜添加帧
+                    if (av_buffersrc_add_frame(buffersrc_ctx, DecodeFrame) < 0) {
+                        throw FFMS_Exception(
+                            FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
+                            "Failed to add frame to filter graph."
+                        );
+                    }
                 // std::cout << "DecodeFrame: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(DecodeFrame->format)) << std::endl;
                 // std::cout << "HWDecodedFrame: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(HWDecodedFrame->format)) << std::endl;
             }
@@ -880,6 +976,8 @@ void FFMS_VideoSource::Free() {
     av_frame_free(&LastDecodedFrame);
     av_frame_free(&HWDecodedFrame);
     av_packet_free(&StashedPacket);
+    avfilter_graph_free(&filter_graph);
+    use_pad_filter = false;
 }
 
 void FFMS_VideoSource::DecodeNextFrame(int64_t &AStartTime, int64_t &Pos) {
