@@ -913,17 +913,17 @@ bool FFMS_VideoSource::DecodePacket(AVPacket *Packet) {
         if (CodecContext->hw_device_ctx && HWDecodedFrame->format == hw_pix_fmt) {
             //关键，硬件帧需要用GPU内存复制到CPU内存
             if (av_hwframe_transfer_data(DecodeFrame, HWDecodedFrame, 0) == 0) {
-                if (use_pad_filter)
-                    // 向滤镜添加帧
-                    if (av_buffersrc_add_frame(buffersrc_ctx, DecodeFrame) < 0) {
-                        throw FFMS_Exception(
-                            FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
-                            "Failed to add frame to filter graph."
-                        );
-                    }
                 // std::cout << "DecodeFrame: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(DecodeFrame->format)) << std::endl;
                 // std::cout << "HWDecodedFrame: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(HWDecodedFrame->format)) << std::endl;
             }
+            if (use_pad_filter)
+                // 向滤镜添加帧
+                if (av_buffersrc_add_frame(buffersrc_ctx, DecodeFrame) < 0) {
+                    throw FFMS_Exception(
+                            FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
+                            "Failed to add frame to filter graph."
+                    );
+                }
         }
         Delay.Decrement();
     } else
