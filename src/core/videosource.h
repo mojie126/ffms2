@@ -23,6 +23,7 @@
 
 extern "C" {
     #include <libavfilter/buffersrc.h>
+    #include <libavfilter/buffersink.h>
     #include <libavfilter/avfilter.h>
     #include <libavformat/avformat.h>
     #include <libavcodec/avcodec.h>
