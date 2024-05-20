@@ -307,6 +307,7 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         LAVFOpenFile(SourceFile, FormatContext, VideoTrack, Index.LAVFOpts);
 
         // 初始化硬件
+//        av_log_set_level(AV_LOG_DEBUG);
         if (hw_name == "none")
             hw_name = nullptr;
         // HWType = getHwDeviceType(true);
@@ -387,6 +388,16 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         // 配置过滤器
         if (padding != 0) {
             use_pad_filter = true;
+            // 使用硬解时，滤镜的输入源需要与输出源像素格式、宽、高等信息一致 -- 开始
+            // 非常卡，完全不如软解增加黑边流畅
+            AVPixelFormat filter_out_pix_fmt = CodecContext->pix_fmt;
+            uint32_t filter_out_height = CodecContext->height;
+            if (HWType) {
+                use_pad_filter = false; // 使用硬解时还是关闭加黑边功能吧...
+//                filter_out_pix_fmt = AV_PIX_FMT_P010LE;
+//                filter_out_height = CodecContext->height + padding * 2; // 并不好使，只增加到了底部且不是黑色
+            }
+            // 使用硬解时，滤镜的输入源需要与输出源像素格式、宽、高等信息一致 -- 结束
             filter_graph = avfilter_graph_alloc();
 
             if (!filter_graph) {
@@ -404,11 +415,10 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             snprintf(
                     args, sizeof(args),
                     "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=%d/%d",
-                    CodecContext->width, CodecContext->height, CodecContext->pix_fmt,
+                    CodecContext->width, filter_out_height, filter_out_pix_fmt,
                     video_stream->time_base.num, video_stream->time_base.den,
                     CodecContext->sample_aspect_ratio.num, CodecContext->sample_aspect_ratio.den
             );
-
 
             // 创建 buffer 滤镜
             if (avfilter_graph_create_filter(&buffersrc_ctx, buffersrc, "in", args, nullptr, filter_graph) < 0) {
@@ -456,18 +466,6 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
                 );
             }
 
-//            const AVFilter* format = avfilter_get_by_name("format");
-//            AVFilterContext* format_ctx;
-//            char format_args[512];
-//            snprintf(format_args, sizeof(format_args), "format=p010le");
-//
-//            if (avfilter_graph_create_filter(&format_ctx, format, "format", format_args, nullptr, filter_graph) < 0) {
-//                throw FFMS_Exception(
-//                        FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
-//                        "Failed to create format filter."
-//                );
-//            }
-
             // 连接各个滤镜
             if (avfilter_link(buffersrc_ctx, 0, pad_ctx, 0) < 0) {
                 throw FFMS_Exception(
@@ -475,12 +473,6 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
                         "Failed to connect buffersrc and pad."
                 );
             }
-//            if (avfilter_link(buffersrc_ctx, 0, format_ctx, 0) < 0) {
-//                throw FFMS_Exception(
-//                        FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
-//                        "Failed to connect buffersrc and format."
-//                );
-//            }
 
             if (avfilter_link(pad_ctx, 0, buffersink_ctx, 0) < 0) {
                 throw FFMS_Exception(
@@ -488,12 +480,6 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
                         "Failed to connect pad and buffersink."
                 );
             }
-//            if (avfilter_link(format_ctx, 0, buffersink_ctx, 0) < 0) {
-//                throw FFMS_Exception(
-//                        FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
-//                        "Failed to connect format and buffersink."
-//                );
-//            }
 
             // 配置滤镜图表
             if (avfilter_graph_config(filter_graph, nullptr) < 0) {
@@ -944,9 +930,13 @@ bool FFMS_VideoSource::DecodePacket(AVPacket *Packet) {
     if (Ret == 0) {
         if (CodecContext->hw_device_ctx && HWDecodedFrame->format == hw_pix_fmt) {
             //关键，硬件帧需要用GPU内存复制到CPU内存
-            if (av_hwframe_transfer_data(DecodeFrame, HWDecodedFrame, 0) == 0) {
-                 std::cout << "DecodeFrame: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(DecodeFrame->format)) << std::endl;
-                 std::cout << "HWDecodedFrame: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(HWDecodedFrame->format)) << std::endl;
+            if (av_hwframe_transfer_data(DecodeFrame, HWDecodedFrame, 0) != 0) {
+//                 std::cout << "DecodeFrame: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(DecodeFrame->format)) << std::endl;
+//                 std::cout << "HWDecodedFrame: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(HWDecodedFrame->format)) << std::endl;
+                throw FFMS_Exception(
+                        FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
+                        "Failed to hw decoding."
+                );
             }
         }
         if (use_pad_filter) {
