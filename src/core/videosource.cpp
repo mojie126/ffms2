@@ -307,7 +307,8 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         LAVFOpenFile(SourceFile, FormatContext, VideoTrack, Index.LAVFOpts);
 
         // 初始化硬件
-//        av_log_set_level(AV_LOG_DEBUG);
+        // av_log_set_level(AV_LOG_DEBUG);
+        // FFMS_SetLogLevel(FFMS_LOG_DEBUG);
         if (hw_name == "none")
             hw_name = nullptr;
         // HWType = getHwDeviceType(true);
