@@ -318,7 +318,7 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Video codec not found");
 
         std::ofstream out;
-        out = std::ofstream("D:/Aegisub_HW.log", std::ios::binary);
+        out = std::ofstream("Aegisub_HW.log", std::ios::binary);
         out << "SourceFile: " << SourceFile << "\n" << std::flush;
         out << "SourceCodec: " << avcodec_get_name(FormatContext->streams[VideoTrack]->codecpar->codec_id) << "\n" << std::flush;
         out << "SourcePixFmt: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(FormatContext->streams[VideoTrack]->codecpar->format)) << "\n\n" << std::flush;
