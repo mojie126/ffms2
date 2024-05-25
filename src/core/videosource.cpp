@@ -289,13 +289,15 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         DecodeFrame = av_frame_alloc();
         LastDecodedFrame = av_frame_alloc();
         HWDecodedFrame = av_frame_alloc();
+        padded_frame = av_frame_alloc();
         StashedPacket = av_packet_alloc();
 
-        if (!DecodeFrame || !LastDecodedFrame || !HWDecodedFrame || !StashedPacket)
+        if (!DecodeFrame || !LastDecodedFrame || !HWDecodedFrame || !padded_frame || !StashedPacket) {
             throw FFMS_Exception(
                 FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED,
                 "Could not allocate dummy frame / stashed packet."
             );
+        }
 
         // Dummy allocations so the unallocated case doesn't have to be handled later
         if (av_image_alloc(SWSFrameData, SWSFrameLinesize, 16, 16, AV_PIX_FMT_GRAY8, 4) < 0)
@@ -395,8 +397,8 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             uint32_t filter_out_height = CodecContext->height;
             if (HWType) {
                 use_pad_filter = false; // 使用硬解时还是关闭加黑边功能吧...
-//                filter_out_pix_fmt = AV_PIX_FMT_P010LE;
-//                filter_out_height = CodecContext->height + padding * 2; // 并不好使，只增加到了底部且不是黑色
+                // filter_out_pix_fmt = AV_PIX_FMT_P010LE;
+                // filter_out_height = CodecContext->height + padding * 2; // 并不好使，只增加到了底部且不是黑色
             }
             // 使用硬解时，滤镜的输入源需要与输出源像素格式、宽、高等信息一致 -- 结束
             filter_graph = avfilter_graph_alloc();
@@ -438,7 +440,7 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             }
 
             // 设置 buffer sink 的像素格式
-            enum AVPixelFormat pix_fmts[] = {
+            AVPixelFormat pix_fmts[] = {
                     AV_PIX_FMT_BGRA,
                     AV_PIX_FMT_RGBA,
                     AV_PIX_FMT_NV12,
@@ -454,31 +456,29 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
                 );
             }
 
-            // 创建 pad 滤镜并添加到滤镜图表中
-            const AVFilter* pad = avfilter_get_by_name("pad");
-            AVFilterContext* pad_ctx;
-            char pad_args[512];
-            snprintf(pad_args, sizeof(pad_args), "width=%d:height=%d:x=0:y=%d:color=black", CodecContext->width, CodecContext->height + padding * 2, padding);
+            AVFilterInOut *outputs = avfilter_inout_alloc();
+            AVFilterInOut *inputs = avfilter_inout_alloc();
 
-            if (avfilter_graph_create_filter(&pad_ctx, pad, "pad", pad_args, nullptr, filter_graph) < 0) {
-                throw FFMS_Exception(
-                        FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
-                        "Failed to create pad filter."
-                );
-            }
+            outputs->name = av_strdup("in");
+            outputs->filter_ctx = buffersrc_ctx;
+            outputs->pad_idx = 0;
+            outputs->next = nullptr;
 
-            // 连接各个滤镜
-            if (avfilter_link(buffersrc_ctx, 0, pad_ctx, 0) < 0) {
-                throw FFMS_Exception(
-                        FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
-                        "Failed to connect buffersrc and pad."
-                );
-            }
+            inputs->name = av_strdup("out");
+            inputs->filter_ctx = buffersink_ctx;
+            inputs->pad_idx = 0;
+            inputs->next = nullptr;
 
-            if (avfilter_link(pad_ctx, 0, buffersink_ctx, 0) < 0) {
+            char filter_spec[512];
+            snprintf(
+                filter_spec, sizeof(filter_spec), "pad=width=%d:height=%d:x=0:y=%d:color=black",
+                CodecContext->width, CodecContext->height + padding * 2, padding
+            );
+
+            if (avfilter_graph_parse_ptr(filter_graph, filter_spec, &inputs, &outputs, nullptr) < 0) {
                 throw FFMS_Exception(
-                        FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
-                        "Failed to connect pad and buffersink."
+                    FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
+                    "Could not parse filter graph."
                 );
             }
 
@@ -932,11 +932,11 @@ bool FFMS_VideoSource::DecodePacket(AVPacket *Packet) {
         if (CodecContext->hw_device_ctx && HWDecodedFrame->format == hw_pix_fmt) {
             //关键，硬件帧需要用GPU内存复制到CPU内存
             if (av_hwframe_transfer_data(DecodeFrame, HWDecodedFrame, 0) != 0) {
-//                 std::cout << "DecodeFrame: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(DecodeFrame->format)) << std::endl;
-//                 std::cout << "HWDecodedFrame: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(HWDecodedFrame->format)) << std::endl;
+                // std::cout << "DecodeFrame: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(DecodeFrame->format)) << std::endl;
+                // std::cout << "HWDecodedFrame: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(HWDecodedFrame->format)) << std::endl;
                 throw FFMS_Exception(
-                        FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
-                        "Failed to hw decoding."
+                    FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
+                    "Failed to hw decoding."
                 );
             }
         }
@@ -944,15 +944,15 @@ bool FFMS_VideoSource::DecodePacket(AVPacket *Packet) {
             // 向滤镜添加帧
             if (av_buffersrc_add_frame(buffersrc_ctx, DecodeFrame) < 0) {
                 throw FFMS_Exception(
-                        FFMS_ERROR_FILTER, FFMS_ERROR_FILTER,
-                        "Failed to add frame to filter graph."
+                    FFMS_ERROR_FILTER, FFMS_ERROR_FILTER,
+                    "Failed to add frame to filter graph."
                 );
             }
             // 取出经过滤镜的帧
             if (av_buffersink_get_frame(buffersink_ctx, DecodeFrame) < 0) {
                 throw FFMS_Exception(
-                        FFMS_ERROR_FILTER, FFMS_ERROR_FILTER,
-                        "Failed to get frame from filter graph."
+                    FFMS_ERROR_FILTER, FFMS_ERROR_FILTER,
+                    "Failed to get frame from filter graph."
                 );
             }
         }
@@ -1007,6 +1007,7 @@ void FFMS_VideoSource::Free() {
     av_frame_free(&DecodeFrame);
     av_frame_free(&LastDecodedFrame);
     av_frame_free(&HWDecodedFrame);
+    av_frame_free(&padded_frame);
     av_packet_free(&StashedPacket);
     avfilter_graph_free(&filter_graph);
     use_pad_filter = false;

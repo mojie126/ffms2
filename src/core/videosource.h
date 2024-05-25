@@ -114,6 +114,9 @@ private:
     // 硬件加速相关
     AVFrame *HWDecodedFrame = nullptr;
     AVHWDeviceType HWType;
+    // 黑边相关
+    AVFrame *padded_frame = nullptr;
+    uint8_t *padded_buffer = nullptr;
     // 过滤器相关
     AVFilterContext *buffersink_ctx = nullptr;
     AVFilterContext *buffersrc_ctx = nullptr;
