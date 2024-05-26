@@ -388,109 +388,6 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
                 "Could not open video codec"
             );
 
-        // 配置过滤器
-        if (padding != 0) {
-            use_pad_filter = true;
-            // 使用硬解时，滤镜的输入源需要与输出源像素格式、宽、高等信息一致 -- 开始
-            // 非常卡，完全不如软解增加黑边流畅
-            AVPixelFormat filter_out_pix_fmt = CodecContext->pix_fmt;
-            uint32_t filter_out_height = CodecContext->height;
-            if (HWType) {
-                use_pad_filter = false; // 使用硬解时还是关闭加黑边功能吧...
-                // filter_out_pix_fmt = AV_PIX_FMT_P010LE;
-                // filter_out_height = CodecContext->height + padding * 2; // 并不好使，只增加到了底部且不是黑色
-            }
-            // 使用硬解时，滤镜的输入源需要与输出源像素格式、宽、高等信息一致 -- 结束
-            filter_graph = avfilter_graph_alloc();
-
-            if (!filter_graph) {
-                throw FFMS_Exception(
-                        FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
-                        "Could not allocate filter."
-                );
-            }
-
-            // 创建 buffer 滤镜，用于作为输入
-            const AVFilter *buffersrc = avfilter_get_by_name("buffer");
-            const AVFilter *buffersink = avfilter_get_by_name("buffersink");
-            AVStream *video_stream = FormatContext->streams[VideoTrack];
-            char args[512];
-            snprintf(
-                    args, sizeof(args),
-                    "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=%d/%d",
-                    CodecContext->width, filter_out_height, filter_out_pix_fmt,
-                    video_stream->time_base.num, video_stream->time_base.den,
-                    CodecContext->sample_aspect_ratio.num, CodecContext->sample_aspect_ratio.den
-            );
-
-            // 创建 buffer 滤镜
-            if (avfilter_graph_create_filter(&buffersrc_ctx, buffersrc, "in", args, nullptr, filter_graph) < 0) {
-                throw FFMS_Exception(
-                        FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
-                        "Failed to create buffer filter."
-                );
-            }
-
-            // 创建 buffer sink 滤镜，用于作为输出
-            if (avfilter_graph_create_filter(&buffersink_ctx, buffersink, "out", nullptr, nullptr, filter_graph) < 0) {
-                throw FFMS_Exception(
-                        FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
-                        "Failed to create buffer sink filter."
-                );
-            }
-
-            // 设置 buffer sink 的像素格式
-            AVPixelFormat pix_fmts[] = {
-                    AV_PIX_FMT_BGRA,
-                    AV_PIX_FMT_RGBA,
-                    AV_PIX_FMT_NV12,
-                    AV_PIX_FMT_P010LE,
-                    AV_PIX_FMT_YUV420P,
-                    AV_PIX_FMT_YUV420P10LE,
-                    AV_PIX_FMT_NONE
-            };
-            if (av_opt_set_int_list(buffersink_ctx, "pix_fmts", pix_fmts, AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN) < 0) {
-                throw FFMS_Exception(
-                        FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
-                        "Failed to set output pixel format."
-                );
-            }
-
-            AVFilterInOut *outputs = avfilter_inout_alloc();
-            AVFilterInOut *inputs = avfilter_inout_alloc();
-
-            outputs->name = av_strdup("in");
-            outputs->filter_ctx = buffersrc_ctx;
-            outputs->pad_idx = 0;
-            outputs->next = nullptr;
-
-            inputs->name = av_strdup("out");
-            inputs->filter_ctx = buffersink_ctx;
-            inputs->pad_idx = 0;
-            inputs->next = nullptr;
-
-            char filter_spec[512];
-            snprintf(
-                filter_spec, sizeof(filter_spec), "pad=width=%d:height=%d:x=0:y=%d:color=black",
-                CodecContext->width, CodecContext->height + padding * 2, padding
-            );
-
-            if (avfilter_graph_parse_ptr(filter_graph, filter_spec, &inputs, &outputs, nullptr) < 0) {
-                throw FFMS_Exception(
-                    FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
-                    "Could not parse filter graph."
-                );
-            }
-
-            // 配置滤镜图表
-            if (avfilter_graph_config(filter_graph, nullptr) < 0) {
-                throw FFMS_Exception(
-                        FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
-                        "Failed to configure filter."
-                );
-            }
-        }
-
         // Similar yet different to h264 workaround above
         // vc1 simply sets has_b_frames to 1 no matter how many there are so instead we set it to the max value
         // in order to not confuse our own delay guesses later
@@ -642,6 +539,108 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         // Cannot "output" without doing all other initialization
         // This is the additional mess required for seekmode=-1 to work in a reasonable way
         OutputFrame(DecodeFrame);
+        // 配置过滤器
+        if (padding != 0) {
+            use_pad_filter = true;
+            // 使用硬解时，滤镜的输入源需要与输出源像素格式、宽、高等信息一致 -- 开始
+            // 非常卡，完全不如软解增加黑边流畅
+            AVPixelFormat filter_out_pix_fmt = CodecContext->pix_fmt;
+            uint32_t filter_out_height = CodecContext->height;
+            if (HWType) {
+                use_pad_filter = false; // 使用硬解时还是关闭加黑边功能吧...
+                // filter_out_pix_fmt = AV_PIX_FMT_P010LE;
+                // filter_out_height = CodecContext->height + padding * 2; // 并不好使，只增加到了底部且不是黑色
+            }
+            // 使用硬解时，滤镜的输入源需要与输出源像素格式、宽、高等信息一致 -- 结束
+            filter_graph = avfilter_graph_alloc();
+
+            if (!filter_graph) {
+                throw FFMS_Exception(
+                    FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
+                    "Could not allocate filter."
+                );
+            }
+
+            // 创建 buffer 滤镜，用于作为输入
+            const AVFilter *buffersrc = avfilter_get_by_name("buffer");
+            const AVFilter *buffersink = avfilter_get_by_name("buffersink");
+            AVStream *video_stream = FormatContext->streams[VideoTrack];
+            char args[512];
+            snprintf(
+                args, sizeof(args),
+                "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=%d/%d",
+                DecodeFrame->width, DecodeFrame->height, DecodeFrame->format,
+                video_stream->time_base.num, video_stream->time_base.den,
+                DecodeFrame->sample_aspect_ratio.num, DecodeFrame->sample_aspect_ratio.den
+            );
+
+            // 创建 buffer 滤镜
+            if (avfilter_graph_create_filter(&buffersrc_ctx, buffersrc, "in", args, nullptr, filter_graph) < 0) {
+                throw FFMS_Exception(
+                    FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
+                    "Failed to create buffer filter."
+                );
+            }
+
+            // 创建 buffer sink 滤镜，用于作为输出
+            if (avfilter_graph_create_filter(&buffersink_ctx, buffersink, "out", nullptr, nullptr, filter_graph) < 0) {
+                throw FFMS_Exception(
+                    FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
+                    "Failed to create buffer sink filter."
+                );
+            }
+
+            // 设置 buffer sink 的像素格式
+            AVPixelFormat pix_fmts[] = {
+                AV_PIX_FMT_BGRA,
+                AV_PIX_FMT_RGBA,
+                AV_PIX_FMT_NV12,
+                AV_PIX_FMT_P010LE,
+                AV_PIX_FMT_YUV420P,
+                AV_PIX_FMT_YUV420P10LE,
+                AV_PIX_FMT_NONE
+            };
+            if (av_opt_set_int_list(buffersink_ctx, "pix_fmts", pix_fmts, AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN) < 0) {
+                throw FFMS_Exception(
+                    FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
+                    "Failed to set output pixel format."
+                );
+            }
+
+            AVFilterInOut *outputs = avfilter_inout_alloc();
+            AVFilterInOut *inputs = avfilter_inout_alloc();
+
+            outputs->name = av_strdup("in");
+            outputs->filter_ctx = buffersrc_ctx;
+            outputs->pad_idx = 0;
+            outputs->next = nullptr;
+
+            inputs->name = av_strdup("out");
+            inputs->filter_ctx = buffersink_ctx;
+            inputs->pad_idx = 0;
+            inputs->next = nullptr;
+
+            char filter_spec[512];
+            snprintf(
+                filter_spec, sizeof(filter_spec), "pad=width=%d:height=%d:x=0:y=%d:color=black",
+                DecodeFrame->width, DecodeFrame->height + padding * 2, padding
+            );
+
+            if (avfilter_graph_parse_ptr(filter_graph, filter_spec, &inputs, &outputs, nullptr) < 0) {
+                throw FFMS_Exception(
+                    FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
+                    "Could not parse filter graph."
+                );
+            }
+
+            // 配置滤镜图表
+            if (avfilter_graph_config(filter_graph, nullptr) < 0) {
+                throw FFMS_Exception(
+                    FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
+                    "Failed to configure filter."
+                );
+            }
+        }
 
         if (LocalFrame.HasMasteringDisplayPrimaries) {
             VP.HasMasteringDisplayPrimaries = LocalFrame.HasMasteringDisplayPrimaries;
@@ -956,7 +955,6 @@ bool FFMS_VideoSource::DecodePacket(AVPacket *Packet) {
                 );
             }
         }
-
         Delay.Decrement();
     } else
         std::swap(DecodeFrame, LastDecodedFrame);
