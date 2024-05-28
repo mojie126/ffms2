@@ -640,6 +640,9 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
                     "Failed to configure filter."
                 );
             }
+
+            avfilter_inout_free(&inputs);
+            avfilter_inout_free(&outputs);
         }
 
         if (LocalFrame.HasMasteringDisplayPrimaries) {
