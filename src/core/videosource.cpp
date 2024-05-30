@@ -319,12 +319,12 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         if (Codec == nullptr)
             throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Video codec not found");
 
-        std::ofstream out;
-        out = std::ofstream("Aegisub_HW.log", std::ios::binary);
-        out << "SourceFile: " << SourceFile << "\n" << std::flush;
-        out << "SourceCodec: " << avcodec_get_name(FormatContext->streams[VideoTrack]->codecpar->codec_id) << "\n" << std::flush;
-        out << "SourcePixFmt: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(FormatContext->streams[VideoTrack]->codecpar->format)) << "\n\n" << std::flush;
-        out << "Codec: " << Codec->name << "\n" << std::flush;
+        // std::ofstream out;
+        // out = std::ofstream("Aegisub_HW.log", std::ios::binary);
+        // out << "SourceFile: " << SourceFile << "\n" << std::flush;
+        // out << "SourceCodec: " << avcodec_get_name(FormatContext->streams[VideoTrack]->codecpar->codec_id) << "\n" << std::flush;
+        // out << "SourcePixFmt: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(FormatContext->streams[VideoTrack]->codecpar->format)) << "\n\n" << std::flush;
+        // out << "Codec: " << Codec->name << "\n" << std::flush;
 
         std::cout << "Codec: " << Codec->name << std::endl;
 
@@ -346,14 +346,14 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         if (HWType != AV_HWDEVICE_TYPE_NONE) {
             if (CodecContext->codec_id != AV_CODEC_ID_AV1) {
                 std::cout << "HWType: " << av_hwdevice_get_type_name(HWType) << std::endl;
-                out << "HWType: " << av_hwdevice_get_type_name(HWType) << "\n" << std::flush;
+                // out << "HWType: " << av_hwdevice_get_type_name(HWType) << "\n" << std::flush;
             } else {
                 std::cout << "HWType: AV1 decoder does not support device type" << std::endl;
-                out << "HWType: AV1 decoder does not support device type" << "\n" << std::flush;
+                // out << "HWType: AV1 decoder does not support device type" << "\n" << std::flush;
             }
         } else {
             std::cout << "HWType: none" << std::endl;
-            out << "HWType: none" << "\n" << std::flush;
+            // out << "HWType: none" << "\n" << std::flush;
         }
 
         if ((HWType == AV_HWDEVICE_TYPE_D3D11VA || HWType == AV_HWDEVICE_TYPE_DXVA2) && CodecContext->codec_id != AV_CODEC_ID_AV1) {
@@ -368,13 +368,13 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             }
             CodecContext->get_format = get_hw_format;
             std::cout << "hw_pix_fmt: " << av_get_pix_fmt_name(hw_pix_fmt) << std::endl;
-            out << "hw_pix_fmt: " << av_get_pix_fmt_name(hw_pix_fmt) << "\n" << std::flush;
+            // out << "hw_pix_fmt: " << av_get_pix_fmt_name(hw_pix_fmt) << "\n" << std::flush;
             // 初始化硬件
             if (hw_decoder_init(CodecContext, HWType) < 0)
                 throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Failed to create specified HW device");
         }
         std::cout << "=====================================\n" << std::endl;
-        out << "=====================================\n" << std::flush;
+        // out << "=====================================\n" << std::flush;
 
         CodecContext->thread_count = DecodingThreads;
         CodecContext->has_b_frames = Frames.MaxBFrames;
