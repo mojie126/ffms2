@@ -362,6 +362,7 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
                 if (!config)
                     throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Decoder does not support device type");
                 if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX && config->device_type == HWType) {
+                    use_hw_but_without_cuda = true;
                     hw_pix_fmt = config->pix_fmt;
                     break;
                 }
@@ -536,9 +537,6 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             }
         }
 
-        // Cannot "output" without doing all other initialization
-        // This is the additional mess required for seekmode=-1 to work in a reasonable way
-        OutputFrame(DecodeFrame);
         // 配置过滤器
         if (padding != 0) {
             use_pad_filter = true;
@@ -564,7 +562,7 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             // 创建 buffer 滤镜，用于作为输入
             const AVFilter *buffersrc = avfilter_get_by_name("buffer");
             const AVFilter *buffersink = avfilter_get_by_name("buffersink");
-            AVStream *video_stream = FormatContext->streams[VideoTrack];
+            const AVStream *video_stream = FormatContext->streams[VideoTrack];
             char args[512];
             snprintf(
                 args, sizeof(args),
@@ -591,13 +589,16 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             }
 
             // 设置 buffer sink 的像素格式
-            AVPixelFormat pix_fmts[] = {
+            constexpr AVPixelFormat pix_fmts[] = {
                 AV_PIX_FMT_BGRA,
                 AV_PIX_FMT_RGBA,
                 AV_PIX_FMT_NV12,
                 AV_PIX_FMT_P010LE,
                 AV_PIX_FMT_YUV420P,
                 AV_PIX_FMT_YUV420P10LE,
+                AV_PIX_FMT_CUDA,
+                AV_PIX_FMT_DXVA2_VLD,
+                AV_PIX_FMT_D3D11,
                 AV_PIX_FMT_NONE
             };
             if (av_opt_set_int_list(buffersink_ctx, "pix_fmts", pix_fmts, AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN) < 0) {
@@ -634,6 +635,10 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             }
 
             // 配置滤镜图表
+            if (use_hw_but_without_cuda)
+                for (unsigned i = 0; i < filter_graph->nb_filters; i++) {
+                    filter_graph->filters[i]->hw_device_ctx = av_buffer_ref(hw_device_ctx);
+                }
             if (avfilter_graph_config(filter_graph, nullptr) < 0) {
                 throw FFMS_Exception(
                     FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
@@ -644,6 +649,9 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             avfilter_inout_free(&inputs);
             avfilter_inout_free(&outputs);
         }
+        // Cannot "output" without doing all other initialization
+        // This is the additional mess required for seekmode=-1 to work in a reasonable way
+        OutputFrame(DecodeFrame);
 
         if (LocalFrame.HasMasteringDisplayPrimaries) {
             VP.HasMasteringDisplayPrimaries = LocalFrame.HasMasteringDisplayPrimaries;
@@ -941,6 +949,8 @@ bool FFMS_VideoSource::DecodePacket(AVPacket *Packet) {
                     "Failed to hw decoding."
                 );
             }
+            av_frame_copy_props(DecodeFrame, HWDecodedFrame);
+            av_frame_unref(HWDecodedFrame);
         }
         if (use_pad_filter) {
             // 向滤镜添加帧
@@ -1011,6 +1021,7 @@ void FFMS_VideoSource::Free() {
     av_frame_free(&padded_frame);
     av_packet_free(&StashedPacket);
     avfilter_graph_free(&filter_graph);
+    use_hw_but_without_cuda = false;
     use_pad_filter = false;
 }
 

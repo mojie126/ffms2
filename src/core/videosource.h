@@ -114,6 +114,7 @@ private:
     // 硬件加速相关
     AVFrame *HWDecodedFrame = nullptr;
     AVHWDeviceType HWType;
+    bool use_hw_but_without_cuda = false;
     // 黑边相关
     AVFrame *padded_frame = nullptr;
     uint8_t *padded_buffer = nullptr;
