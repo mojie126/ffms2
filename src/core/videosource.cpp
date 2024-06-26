@@ -649,6 +649,12 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             avfilter_inout_free(&inputs);
             avfilter_inout_free(&outputs);
         }
+
+        // If we are in linear no-rewind mode, don't attempt to seek during init.
+        // Bypass the INITIALIZE_SOURCE stage.
+        if (SeekMode < 0)
+            Stage = DecodeStage::INITIALIZE;
+
         // Cannot "output" without doing all other initialization
         // This is the additional mess required for seekmode=-1 to work in a reasonable way
         OutputFrame(DecodeFrame);
