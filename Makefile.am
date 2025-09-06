@@ -56,6 +56,9 @@ include_HEADERS = $(top_srcdir)/include/ffms.h $(top_srcdir)/include/ffmscompat.
 
 bin_PROGRAMS = src/index/ffmsindex
 src_index_ffmsindex_SOURCES = src/index/ffmsindex.cpp
+if WINDOWS
+src_index_ffmsindex_LDFLAGS = -municode
+endif
 src_index_ffmsindex_LDADD = -lavutil src/core/libffms2.la
 
 .PHONY: test test-build test-clean test-sync test-run
@@ -77,13 +80,13 @@ test-build: test-setup src/core/libffms2.la
 	@if [ ! -d "$(abs_top_srcdir)/test/googletest" ]; then \
         echo "googletest submodule not initalized."; \
     fi
-	@$(MAKE) -C test USER_DIR=$(abs_top_srcdir) SAMPLES_DIR=$(SAMPLES_DIR) CXX=$(CXX) AR=$(AR)
+	@$(MAKE) -C test USER_DIR=$(abs_top_srcdir) SAMPLES_DIR=$(SAMPLES_DIR) CXX="$(CXX)" AR="$(AR)"
 
 test-sync: test-setup
-	@$(MAKE) -C test sync USER_DIR=$(abs_top_srcdir) SAMPLES_DIR=$(SAMPLES_DIR) SAMPLES_URL=$(SAMPLES_URL) CXX=$(CXX) AR=$(AR)
+	@$(MAKE) -C test sync USER_DIR=$(abs_top_srcdir) SAMPLES_DIR=$(SAMPLES_DIR) SAMPLES_URL=$(SAMPLES_URL) CXX="$(CXX)" AR="$(AR)"
 
 test-run: test-build
-	@$(MAKE) -C test run USER_DIR=$(abs_top_srcdir) SAMPLES_DIR=$(SAMPLES_DIR) CXX=$(CXX) AR=$(AR) -k
+	@$(MAKE) -C test run USER_DIR=$(abs_top_srcdir) SAMPLES_DIR=$(SAMPLES_DIR) CXX="$(CXX)" AR="$(AR)" -k
 
 test-clean:
-	@$(MAKE) -C test clean USER_DIR=$(abs_top_srcdir) CXX=$(CXX) AR=$(AR)
+	@$(MAKE) -C test clean USER_DIR=$(abs_top_srcdir) CXX="$(CXX)" AR="$(AR)"
