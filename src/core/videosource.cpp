@@ -685,9 +685,12 @@ void FFMS_VideoSource::SetVideoProperties() {
         VP.ColorRange = AVCOL_RANGE_JPEG;
 
 
-    VP.FirstTime = ((Frames[Frames.RealFrameNumber(0)].PTS * Frames.TB.Num) / (double)Frames.TB.Den) / 1000;
-    VP.LastTime = ((Frames[Frames.RealFrameNumber(Frames.VisibleFrameCount()-1)].PTS * Frames.TB.Num) / (double)Frames.TB.Den) / 1000;
-    VP.LastEndTime = (((Frames[Frames.RealFrameNumber(Frames.VisibleFrameCount()-1)].PTS + Frames.LastDuration) * Frames.TB.Num) / (double)Frames.TB.Den) / 1000;
+    auto FirstPTS = Frames[Frames.RealFrameNumber(0)].PTS;
+    auto LastPTS = Frames[Frames.RealFrameNumber(Frames.VisibleFrameCount()-1)].PTS;
+    VP.LastEndPTS = LastPTS + Frames.LastDuration;
+    VP.FirstTime = ((FirstPTS * Frames.TB.Num) / (double)Frames.TB.Den) / 1000;
+    VP.LastTime = ((LastPTS * Frames.TB.Num) / (double)Frames.TB.Den) / 1000;
+    VP.LastEndTime = ((VP.LastEndPTS * Frames.TB.Num) / (double)Frames.TB.Den) / 1000;
 
     if (CodecContext->width <= 0 || CodecContext->height <= 0)
         throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
@@ -916,12 +919,7 @@ bool FFMS_VideoSource::SeekTo(int n, int SeekOffset) {
         // Seeking too close to the end of the stream can result in a different decoder delay since
         // frames are returned as soon as draining starts, so avoid this to keep the delay predictable.
         // Is the +1 necessary here? Not sure, but let's keep it to be safe.
-        int EndOfStreamDist = CodecContext->has_b_frames + 1;
-
-        if (CodecContext->codec_id == AV_CODEC_ID_H264)
-            // Work around a bug in ffmpeg's h264 decoder where frames are skipped when seeking too
-            // close to the end in open-gop files: https://trac.ffmpeg.org/ticket/10936
-            EndOfStreamDist *= 2;
+        int EndOfStreamDist = Delay.ReorderDelay + Delay.ThreadDelay + 1;
 
         TargetFrame = std::min(TargetFrame, Frames.RealFrameNumber(std::max(0, VP.NumFrames - 1 - EndOfStreamDist)));
 

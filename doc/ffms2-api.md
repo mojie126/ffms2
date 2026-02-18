@@ -1052,6 +1052,7 @@ typedef struct {
   unsigned int ContentLightLevelMax;
   unsigned int ContentLightLevelAverage;
   int Flip;
+  int64_t LastEndPTS;
 } FFMS_VideoProperties;
 ```
 A struct containing metadata about a video track.
@@ -1081,7 +1082,7 @@ The fields are:
  - `int Rotation;` - The rotation of the video, in degrees.
  - `int Stereo3DType;` - The type of stereo 3D the video is. Corresponts to entries in [FFMS_Stereo3DType][Stereo3DType].
  - `int Stereo3DFlags;` - Stereo 3D flags. Corresponds to entries in [FFMS_Stereo3DFlags][Stereo3DFlags].
- - `double LastEndTime;` - The end time of the last packet of the stream, in milliseconds.
+ - `double LastEndTime;` - The end time of the last packet of the stream, in seconds.
  - `int HasMasteringDisplayPrimaries;` - If this is non-zero, the following four properties are set.
  - `double MasteringDisplayPrimariesX[3];` - RGB chromaticy coordinates of the mastering display (x coord).
  - `double MasteringDisplayPrimariesY[3];` - RGB chromaticy coordinates of the mastering display (y coord).
@@ -1094,6 +1095,7 @@ The fields are:
  - `unsigned int ContentLightLevelMax;` - Maximum content luminance (cd/m^2).
  - `unsigned int ContentLightLevelAverage;` - Average content luminance (cd/m^2).
  - `int Flip;` - Flip direction to be applied *before* rotation: 0 for no operation, >0 for horizontal flip, <0 for vertical flip.
+ - `int64_t LastEndPTS;` - The end PTS of the last packet of the stream.
 
 ### FFMS_AudioProperties
 
