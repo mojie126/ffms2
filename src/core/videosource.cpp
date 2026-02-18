@@ -311,7 +311,7 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         // 初始化硬件
         // av_log_set_level(AV_LOG_DEBUG);
         // FFMS_SetLogLevel(FFMS_LOG_DEBUG);
-        if (hw_name == "none")
+        if (hw_name && strcmp(hw_name, "none") == 0)
             hw_name = nullptr;
         // HWType = getHwDeviceType(true);
         HWType = getHwDeviceType(hw_name);
