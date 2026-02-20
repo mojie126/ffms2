@@ -222,28 +222,37 @@ const AVCodec *getDecoder(const AVCodecID codec_id, const AVHWDeviceType hw_type
         } else if (codec_id == AV_CODEC_ID_VC1) {
             decoder = "vc1_cuvid";
         }
-        return avcodec_find_decoder_by_name(decoder);
+        if (decoder) {
+            if (const AVCodec *hw_decoder = avcodec_find_decoder_by_name(decoder))
+                return hw_decoder;
+        }
     }
     return avcodec_find_decoder(codec_id);
 }
 
-static AVPixelFormat hw_pix_fmt;
-static AVBufferRef *hw_device_ctx = nullptr;
-
-static int hw_decoder_init(AVCodecContext *ctx, const AVHWDeviceType type) {
+static int hw_decoder_init(AVCodecContext *ctx, AVBufferRef **device_ctx, const AVHWDeviceType type) {
     int err;
-    if ((err = av_hwdevice_ctx_create(&hw_device_ctx, type, nullptr, nullptr, 0)) < 0) {
+    av_buffer_unref(device_ctx);
+    if ((err = av_hwdevice_ctx_create(device_ctx, type, nullptr, nullptr, 0)) < 0) {
         fprintf(stderr, "Failed to create specified HW device.\n");
         return err;
     }
-    ctx->hw_device_ctx = av_buffer_ref(hw_device_ctx);
-    return err;
+    ctx->hw_device_ctx = av_buffer_ref(*device_ctx);
+    if (!ctx->hw_device_ctx)
+        return AVERROR(ENOMEM);
+    return 0;
 }
 
 // 遍历 pix_fmts 数组，查找是否有与 hw_pix_fmt 相等的像素格式，如果找到则返回该像素格式
 static AVPixelFormat get_hw_format(AVCodecContext *ctx, const AVPixelFormat *pix_fmts) {
+    const auto *wanted = static_cast<const AVPixelFormat *>(ctx->opaque);
+    if (!wanted || *wanted == AV_PIX_FMT_NONE) {
+        fprintf(stderr, "Missing HW surface format hint.\n");
+        return AV_PIX_FMT_NONE;
+    }
+
     for (const AVPixelFormat *p = pix_fmts; *p != -1; p++) {
-        if (*p == hw_pix_fmt) {
+        if (*p == *wanted) {
             return *p;
         }
     }
@@ -328,16 +337,13 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
 
         std::cout << "Codec: " << Codec->name << std::endl;
 
-        FormatContext->flags |= AV_CODEC_FLAG_LOW_DELAY;
-        FormatContext->flags |= AV_CODEC_FLAG_LOW_DELAY;
         FormatContext->max_analyze_duration = 1 * AV_TIME_BASE;
         // 打开解码器
         CodecContext = avcodec_alloc_context3(Codec);
-        CodecContext->flags |= AV_CODEC_FLAG_LOW_DELAY;
-        CodecContext->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-
         if (CodecContext == nullptr)
             throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED, "Could not allocate video codec context.");
+        CodecContext->opaque = nullptr;
+        CodecContext->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
         if (avcodec_parameters_to_context(CodecContext, FormatContext->streams[VideoTrack]->codecpar) < 0)
             throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Could not copy video decoder parameters.");
 
@@ -362,22 +368,29 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
                 if (!config)
                     throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Decoder does not support device type");
                 if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX && config->device_type == HWType) {
-                    use_hw_but_without_cuda = true;
                     hw_pix_fmt = config->pix_fmt;
                     break;
                 }
             }
+            // Store the preferred HW surface format in context-local opaque data.
+            // The pointed storage is a FFMS_VideoSource member and lives until Free().
+            CodecContext->opaque = &hw_pix_fmt;
             CodecContext->get_format = get_hw_format;
             std::cout << "hw_pix_fmt: " << av_get_pix_fmt_name(hw_pix_fmt) << std::endl;
             // out << "hw_pix_fmt: " << av_get_pix_fmt_name(hw_pix_fmt) << "\n" << std::flush;
             // 初始化硬件
-            if (hw_decoder_init(CodecContext, HWType) < 0)
+            if (hw_decoder_init(CodecContext, &hw_device_ctx, HWType) < 0)
                 throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Failed to create specified HW device");
         }
         std::cout << "=====================================\n" << std::endl;
         // out << "=====================================\n" << std::flush;
 
-        CodecContext->thread_count = DecodingThreads;
+        const std::string codec_name = Codec->name ? Codec->name : "";
+        const bool using_cuvid_decoder = codec_name.find("_cuvid") != std::string::npos;
+        const bool using_hwaccel_decode = CodecContext->hw_device_ctx != nullptr || using_cuvid_decoder;
+        // Hard decode paths are more sensitive to frame reordering and queue delay.
+        // Keep them single-threaded to reduce latency jitter and potential mis-order.
+        CodecContext->thread_count = using_hwaccel_decode ? 1 : DecodingThreads;
         CodecContext->has_b_frames = Frames.MaxBFrames;
         // Full explanation by more clever person availale here: https://github.com/Nevcairiel/LAVFilters/issues/113
         if (CodecContext->codec_id == AV_CODEC_ID_H264 && CodecContext->has_b_frames)
@@ -401,7 +414,7 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             Delay.ReorderDelay = CodecContext->delay;
         } else {
             // In theory we can move this to CodecContext->delay, sort of, one day, maybe. Not now.
-            Delay.ReorderDelay = CodecContext->has_b_frames; // Normal decoder delay
+            Delay.ReorderDelay = std::max({CodecContext->has_b_frames, CodecContext->delay, Frames.MaxBFrames}); // Normal decoder delay
             if (CodecContext->active_thread_type & FF_THREAD_FRAME) // Adjust for frame based threading
                 Delay.ThreadDelay = CodecContext->thread_count - 1;
         }
@@ -540,16 +553,6 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         // 配置过滤器
         if (padding != 0) {
             use_pad_filter = true;
-            // 使用硬解时，滤镜的输入源需要与输出源像素格式、宽、高等信息一致 -- 开始
-            // 非常卡，完全不如软解增加黑边流畅
-            AVPixelFormat filter_out_pix_fmt = CodecContext->pix_fmt;
-            uint32_t filter_out_height = CodecContext->height;
-            if (HWType) {
-                use_pad_filter = false; // 使用硬解时还是关闭加黑边功能吧...
-                // filter_out_pix_fmt = AV_PIX_FMT_P010LE;
-                // filter_out_height = CodecContext->height + padding * 2; // 并不好使，只增加到了底部且不是黑色
-            }
-            // 使用硬解时，滤镜的输入源需要与输出源像素格式、宽、高等信息一致 -- 结束
             filter_graph = avfilter_graph_alloc();
 
             if (!filter_graph) {
@@ -588,17 +591,9 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
                 );
             }
 
-            // 设置 buffer sink 的像素格式
-            constexpr AVPixelFormat pix_fmts[] = {
-                AV_PIX_FMT_BGRA,
-                AV_PIX_FMT_RGBA,
-                AV_PIX_FMT_NV12,
-                AV_PIX_FMT_P010LE,
-                AV_PIX_FMT_YUV420P,
-                AV_PIX_FMT_YUV420P10LE,
-                AV_PIX_FMT_CUDA,
-                AV_PIX_FMT_DXVA2_VLD,
-                AV_PIX_FMT_D3D11,
+            // 保持和解码帧同像素格式，避免 pad 额外触发颜色转换导致卡顿
+            AVPixelFormat pix_fmts[] = {
+                static_cast<AVPixelFormat>(DecodeFrame->format),
                 AV_PIX_FMT_NONE
             };
             if (av_opt_set_int_list(buffersink_ctx, "pix_fmts", pix_fmts, AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN) < 0) {
@@ -635,10 +630,6 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             }
 
             // 配置滤镜图表
-            if (use_hw_but_without_cuda)
-                for (unsigned i = 0; i < filter_graph->nb_filters; i++) {
-                    filter_graph->filters[i]->hw_device_ctx = av_buffer_ref(hw_device_ctx);
-                }
             if (avfilter_graph_config(filter_graph, nullptr) < 0) {
                 throw FFMS_Exception(
                     FFMS_ERROR_FILTER, FFMS_ERROR_ALLOCATION_FAILED,
@@ -739,13 +730,13 @@ void FFMS_VideoSource::SetInputFormat(int ColorSpace, int ColorRange, AVPixelFor
 }
 
 void FFMS_VideoSource::DetectInputFormat() {
-    // 关键，因为硬件像素格式传入肯定是NONE，所以不可以用解码器的设置的像素格式，需要用解码后的像素格式
+    // 优先使用当前输出帧格式，确保硬解/软解路径都得到实际可处理的像素格式。
     if (InputFormat == AV_PIX_FMT_NONE) {
-        if (HWType == AV_HWDEVICE_TYPE_NONE || HWType == AV_HWDEVICE_TYPE_CUDA || CodecContext->codec_id == AV_CODEC_ID_AV1) {
-            InputFormat = CodecContext->pix_fmt;
-        } else if (HWType == AV_HWDEVICE_TYPE_D3D11VA || HWType == AV_HWDEVICE_TYPE_DXVA2) {
+        if (DecodeFrame && DecodeFrame->format != AV_PIX_FMT_NONE) {
             InputFormat = static_cast<AVPixelFormat>(DecodeFrame->format);
         }
+        if (InputFormat == AV_PIX_FMT_NONE)
+            InputFormat = CodecContext->pix_fmt;
     }
 
     AVColorRange RangeFromFormat = handle_jpeg(&InputFormat);
@@ -939,40 +930,53 @@ bool FFMS_VideoSource::DecodePacket(AVPacket *Packet) {
         Delay.Increment(PacketHidden, SecondField);
     }
 
-    if (HWType == AV_HWDEVICE_TYPE_NONE || HWType == AV_HWDEVICE_TYPE_CUDA || CodecContext->codec_id == AV_CODEC_ID_AV1) {
-        Ret = avcodec_receive_frame(CodecContext, DecodeFrame);
-    } else {
+    const bool using_hw_surface = CodecContext->hw_device_ctx != nullptr;
+    if (using_hw_surface) {
         Ret = avcodec_receive_frame(CodecContext, HWDecodedFrame);
+    } else {
+        Ret = avcodec_receive_frame(CodecContext, DecodeFrame);
     }
     if (Ret == 0) {
-        if (CodecContext->hw_device_ctx && HWDecodedFrame->format == hw_pix_fmt) {
-            //关键，硬件帧需要用GPU内存复制到CPU内存
-            if (av_hwframe_transfer_data(DecodeFrame, HWDecodedFrame, 0) != 0) {
-                // std::cout << "DecodeFrame: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(DecodeFrame->format)) << std::endl;
-                // std::cout << "HWDecodedFrame: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(HWDecodedFrame->format)) << std::endl;
-                throw FFMS_Exception(
-                    FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
-                    "Failed to hw decoding."
-                );
+        if (using_hw_surface) {
+            av_frame_unref(DecodeFrame);
+            if (CodecContext->hw_device_ctx && HWDecodedFrame->format == hw_pix_fmt) {
+                // 硬件帧需要复制到 CPU 内存供后续处理
+                if (av_hwframe_transfer_data(DecodeFrame, HWDecodedFrame, 0) != 0) {
+                    throw FFMS_Exception(
+                        FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
+                        "Failed to transfer HW frame to system memory."
+                    );
+                }
+                av_frame_copy_props(DecodeFrame, HWDecodedFrame);
+            } else {
+                // 某些情况下解码器会返回软件帧，直接引用避免输出旧帧
+                if (av_frame_ref(DecodeFrame, HWDecodedFrame) < 0) {
+                    throw FFMS_Exception(
+                        FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED,
+                        "Could not reference decoded frame."
+                    );
+                }
             }
-            av_frame_copy_props(DecodeFrame, HWDecodedFrame);
             av_frame_unref(HWDecodedFrame);
         }
         if (use_pad_filter) {
             // 向滤镜添加帧
-            if (av_buffersrc_add_frame(buffersrc_ctx, DecodeFrame) < 0) {
+            if (av_buffersrc_add_frame_flags(buffersrc_ctx, DecodeFrame, AV_BUFFERSRC_FLAG_KEEP_REF) < 0) {
                 throw FFMS_Exception(
                     FFMS_ERROR_FILTER, FFMS_ERROR_FILTER,
                     "Failed to add frame to filter graph."
                 );
             }
             // 取出经过滤镜的帧
-            if (av_buffersink_get_frame(buffersink_ctx, DecodeFrame) < 0) {
+            av_frame_unref(padded_frame);
+            if (av_buffersink_get_frame(buffersink_ctx, padded_frame) < 0) {
                 throw FFMS_Exception(
                     FFMS_ERROR_FILTER, FFMS_ERROR_FILTER,
                     "Failed to get frame from filter graph."
                 );
             }
+            av_frame_unref(DecodeFrame);
+            av_frame_move_ref(DecodeFrame, padded_frame);
         }
         Delay.Decrement();
     } else
@@ -1027,7 +1031,8 @@ void FFMS_VideoSource::Free() {
     av_frame_free(&padded_frame);
     av_packet_free(&StashedPacket);
     avfilter_graph_free(&filter_graph);
-    use_hw_but_without_cuda = false;
+    av_buffer_unref(&hw_device_ctx);
+    hw_pix_fmt = AV_PIX_FMT_NONE;
     use_pad_filter = false;
 }
 
@@ -1108,7 +1113,7 @@ bool FFMS_VideoSource::SeekTo(int n, int SeekOffset) {
         // Seeking too close to the end of the stream can result in a different decoder delay since
         // frames are returned as soon as draining starts, so avoid this to keep the delay predictable.
         // Is the +1 necessary here? Not sure, but let's keep it to be safe.
-        int EndOfStreamDist = CodecContext->has_b_frames + 1;
+        int EndOfStreamDist = std::max(CodecContext->has_b_frames, Delay.ReorderDelay) + 1;
 
         if (CodecContext->codec_id == AV_CODEC_ID_H264)
             // Work around a bug in ffmpeg's h264 decoder where frames are skipped when seeking too
