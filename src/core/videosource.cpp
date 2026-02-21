@@ -471,6 +471,27 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             VP.SARDen = FormatContext->streams[VideoTrack]->sample_aspect_ratio.den;
         }
 
+        // 从codecpar获取流级色彩参数（硬件解码时帧级属性可能为UNSPECIFIED）
+        VP.StreamTransferCharacteristics = FormatContext->streams[VideoTrack]->codecpar->color_trc;
+        VP.StreamColorSpace = FormatContext->streams[VideoTrack]->codecpar->color_space;
+        VP.StreamColorPrimaries = FormatContext->streams[VideoTrack]->codecpar->color_primaries;
+
+        // 检测流级Dolby Vision配置记录（AV_PKT_DATA_DOVI_CONF）
+        VP.HasDolbyVision = 0;
+        VP.DolbyVisionProfile = 0;
+        {
+            const AVPacketSideData *DoviSd = av_packet_side_data_get(
+                FormatContext->streams[VideoTrack]->codecpar->coded_side_data,
+                FormatContext->streams[VideoTrack]->codecpar->nb_coded_side_data,
+                AV_PKT_DATA_DOVI_CONF);
+            if (DoviSd && DoviSd->data && DoviSd->size >= sizeof(AVDOVIDecoderConfigurationRecord)) {
+                const AVDOVIDecoderConfigurationRecord *dovi =
+                    reinterpret_cast<const AVDOVIDecoderConfigurationRecord *>(DoviSd->data);
+                VP.HasDolbyVision = 1;
+                VP.DolbyVisionProfile = dovi->dv_profile;
+            }
+        }
+
         // Set stereoscopic 3d type
         VP.Stereo3DType = FFMS_S3D_TYPE_2D;
         VP.Stereo3DFlags = 0;

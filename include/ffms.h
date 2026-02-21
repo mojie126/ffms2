@@ -397,6 +397,13 @@ typedef struct FFMS_VideoProperties {
     unsigned int ContentLightLevelAverage;
     /* Introduced in FFMS_VERSION ((2 << 24) | (31 << 16) | (0 << 8) | 0) */
     int Flip; /* -1 = Vertical flip, 1 = Horizontal flip */
+    /* 流级色彩参数（从codecpar获取，硬件解码时帧级可能为UNSPECIFIED） */
+    int StreamTransferCharacteristics; /* AVColorTransferCharacteristic from stream */
+    int StreamColorSpace;              /* AVColorSpace from stream */
+    int StreamColorPrimaries;          /* AVColorPrimaries from stream */
+    /* 流级Dolby Vision配置记录检测 */
+    int HasDolbyVision;                /* Non-zero if DOVI configuration record found in stream */
+    int DolbyVisionProfile;            /* Dolby Vision profile number (0 if unknown) */
 } FFMS_VideoProperties;
 
 typedef struct FFMS_AudioProperties {
