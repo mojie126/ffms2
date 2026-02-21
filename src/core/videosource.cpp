@@ -417,6 +417,17 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             Delay.ReorderDelay = std::max({CodecContext->has_b_frames, CodecContext->delay, Frames.MaxBFrames}); // Normal decoder delay
             if (CodecContext->active_thread_type & FF_THREAD_FRAME) // Adjust for frame based threading
                 Delay.ThreadDelay = CodecContext->thread_count - 1;
+
+            // 硬件解码（含 D3D11VA/DXVA2/cuvid）以单线程运行（ThreadDelay=0），
+            // 所有 Increment 直接累加到 ReorderDelayCounter。
+            // 多线程解码时 ThreadDelayCounter 吸收了大部分 Increment，
+            // ReorderDelayCounter 保持较低；单线程解码时全部累加到
+            // ReorderDelayCounter，首帧解码后 ReorderDC ≈ has_b_frames+2，
+            // 超过原始 ReorderDelay=has_b_frames 阈值，
+            // APPLY_DELAY 阶段 IsExceeded() 误判并跳过帧。
+            // +2 确保 ReorderDC（≈has_b_frames+2）不超过阈值（strict >）。
+            if (using_hwaccel_decode)
+                Delay.ReorderDelay += 2;
         }
 
         SeekByPos = !strcmp(FormatContext->iformat->name, "mpeg") || !strcmp(FormatContext->iformat->name, "mpegts") || !strcmp(FormatContext->iformat->name, "mpegtsraw");
