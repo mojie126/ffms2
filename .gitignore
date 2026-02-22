@@ -4,6 +4,7 @@
 /testing
 /todo.txt
 /dist
+/.meson-subproject-wrap-hash.txt
 
 # /build-msvc/
 /build-msvc/*.sdf
