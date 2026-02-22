@@ -234,7 +234,7 @@ static int hw_decoder_init(AVCodecContext *ctx, AVBufferRef **device_ctx, const 
     int err;
     av_buffer_unref(device_ctx);
     if ((err = av_hwdevice_ctx_create(device_ctx, type, nullptr, nullptr, 0)) < 0) {
-        fprintf(stderr, "Failed to create specified HW device.\n");
+        av_log(ctx, AV_LOG_ERROR, "Failed to create specified HW device.\n");
         return err;
     }
     ctx->hw_device_ctx = av_buffer_ref(*device_ctx);
@@ -247,7 +247,7 @@ static int hw_decoder_init(AVCodecContext *ctx, AVBufferRef **device_ctx, const 
 static AVPixelFormat get_hw_format(AVCodecContext *ctx, const AVPixelFormat *pix_fmts) {
     const auto *wanted = static_cast<const AVPixelFormat *>(ctx->opaque);
     if (!wanted || *wanted == AV_PIX_FMT_NONE) {
-        fprintf(stderr, "Missing HW surface format hint.\n");
+        av_log(ctx, AV_LOG_ERROR, "Missing HW surface format hint.\n");
         return AV_PIX_FMT_NONE;
     }
 
@@ -256,7 +256,7 @@ static AVPixelFormat get_hw_format(AVCodecContext *ctx, const AVPixelFormat *pix
             return *p;
         }
     }
-    fprintf(stderr, "Failed to get HW surface format.\n");
+    av_log(ctx, AV_LOG_ERROR, "Failed to get HW surface format.\n");
     return AV_PIX_FMT_NONE;
 }
 
@@ -318,8 +318,6 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         LAVFOpenFile(SourceFile, FormatContext, VideoTrack, Index.LAVFOpts);
 
         // 初始化硬件
-        // av_log_set_level(AV_LOG_DEBUG);
-        // FFMS_SetLogLevel(FFMS_LOG_DEBUG);
         if (hw_name && strcmp(hw_name, "none") == 0)
             hw_name = nullptr;
         // HWType = getHwDeviceType(true);
@@ -335,8 +333,6 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         // out << "SourcePixFmt: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(FormatContext->streams[VideoTrack]->codecpar->format)) << "\n\n" << std::flush;
         // out << "Codec: " << Codec->name << "\n" << std::flush;
 
-        std::cout << "Codec: " << Codec->name << std::endl;
-
         FormatContext->max_analyze_duration = 1 * AV_TIME_BASE;
         // 打开解码器
         CodecContext = avcodec_alloc_context3(Codec);
@@ -351,14 +347,11 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         // HWType = av_hwdevice_find_type_by_name("dxva2");
         if (HWType != AV_HWDEVICE_TYPE_NONE) {
             if (CodecContext->codec_id != AV_CODEC_ID_AV1) {
-                std::cout << "HWType: " << av_hwdevice_get_type_name(HWType) << std::endl;
                 // out << "HWType: " << av_hwdevice_get_type_name(HWType) << "\n" << std::flush;
             } else {
-                std::cout << "HWType: AV1 decoder does not support device type" << std::endl;
                 // out << "HWType: AV1 decoder does not support device type" << "\n" << std::flush;
             }
         } else {
-            std::cout << "HWType: none" << std::endl;
             // out << "HWType: none" << "\n" << std::flush;
         }
 
@@ -376,13 +369,11 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             // The pointed storage is a FFMS_VideoSource member and lives until Free().
             CodecContext->opaque = &hw_pix_fmt;
             CodecContext->get_format = get_hw_format;
-            std::cout << "hw_pix_fmt: " << av_get_pix_fmt_name(hw_pix_fmt) << std::endl;
             // out << "hw_pix_fmt: " << av_get_pix_fmt_name(hw_pix_fmt) << "\n" << std::flush;
             // 初始化硬件
             if (hw_decoder_init(CodecContext, &hw_device_ctx, HWType) < 0)
                 throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Failed to create specified HW device");
         }
-        std::cout << "=====================================\n" << std::endl;
         // out << "=====================================\n" << std::flush;
 
         const std::string codec_name = Codec->name ? Codec->name : "";
