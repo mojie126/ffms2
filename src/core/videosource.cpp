@@ -387,11 +387,24 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         if (CodecContext->codec_id == AV_CODEC_ID_H264 && CodecContext->has_b_frames)
             CodecContext->has_b_frames = 15; // the maximum possible value for h264
 
-        if (avcodec_open2(CodecContext, Codec, nullptr) < 0)
+        // 禁用 Dolby Vision RPU 像素变换，保留原始 Base Layer 像素
+        // apply_dovi=0：解码器不做逐帧 RPU reshape，但仍输出 AV_FRAME_DATA_DOVI_METADATA
+        // 避免解码器 reshape + 静态 LUT 双重映射导致的颜色跳变
+        // 注意：FFmpeg 6.0 的 HEVC 解码器不识别此选项（被静默忽略），
+        //       FFmpeg 7.0+ 才支持 apply_dovi 选项，此处提前设置以确保前向兼容
+        AVDictionary *codec_opts = nullptr;
+        if (CodecContext->codec_id == AV_CODEC_ID_HEVC) {
+            av_dict_set(&codec_opts, "apply_dovi", "0", 0);
+        }
+
+        if (avcodec_open2(CodecContext, Codec, &codec_opts) < 0) {
+            av_dict_free(&codec_opts);
             throw FFMS_Exception(
                 FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
                 "Could not open video codec"
             );
+        }
+        av_dict_free(&codec_opts);
 
         // Similar yet different to h264 workaround above
         // vc1 simply sets has_b_frames to 1 no matter how many there are so instead we set it to the max value
