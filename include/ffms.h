@@ -347,6 +347,10 @@ typedef struct FFMS_Frame {
     /* Introduced in FFMS_VERSION ((3 << 24) | (1 << 16) | (1 << 8) | 0) */
     uint8_t *HDR10Plus;
     int HDR10PlusSize;
+    /* 解析后的 Dolby Vision 元数据（AVDOVIMetadata 内存块拷贝），逐帧动态色调映射用 */
+    uint8_t *DolbyVisionMetadata;
+    int DolbyVisionMetadataSize;
+    int HasDolbyVisionMetadata; /* 非零表示 DolbyVisionMetadata 有效 */
 } FFMS_Frame;
 
 typedef struct FFMS_TrackTimeBase {

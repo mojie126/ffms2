@@ -107,6 +107,8 @@ private:
     FFMS_Frame LocalFrame = {};
     uint8_t *RPUBuffer = nullptr;
     size_t RPUBufferSize = 0;
+    uint8_t *DoviMetaBuffer = nullptr;
+    size_t DoviMetaBufferSize = 0;
     uint8_t *HDR10PlusBuffer = nullptr;
     size_t HDR10PlusBufferSize = 0;
     AVFrame *DecodeFrame = nullptr;

@@ -157,6 +157,27 @@ FFMS_Frame *FFMS_VideoSource::OutputFrame(AVFrame *Frame) {
         LocalFrame.DolbyVisionRPUSize = DolbyVisionRPUSideData->size;
     }
 
+    // 提取 FFmpeg 已解析的 Dolby Vision 元数据（AVDOVIMetadata 结构体）
+    // HEVC 解码器在 ff_dovi_rpu_parse() + ff_dovi_attach_side_data() 后自动生成
+    LocalFrame.HasDolbyVisionMetadata = 0;
+    LocalFrame.DolbyVisionMetadata = nullptr;
+    LocalFrame.DolbyVisionMetadataSize = 0;
+    const AVFrameSideData *DoviMetaSideData = av_frame_get_side_data(Frame, AV_FRAME_DATA_DOVI_METADATA);
+    if (DoviMetaSideData && DoviMetaSideData->size > 0) {
+        if (static_cast<size_t>(DoviMetaSideData->size) > DoviMetaBufferSize) {
+            void *tmp = av_realloc(DoviMetaBuffer, DoviMetaSideData->size);
+            if (!tmp)
+                throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED,
+                                     "Could not allocate Dolby Vision metadata buffer.");
+            DoviMetaBuffer = reinterpret_cast<uint8_t *>(tmp);
+            DoviMetaBufferSize = DoviMetaSideData->size;
+        }
+        memcpy(DoviMetaBuffer, DoviMetaSideData->data, DoviMetaSideData->size);
+        LocalFrame.DolbyVisionMetadata = DoviMetaBuffer;
+        LocalFrame.DolbyVisionMetadataSize = DoviMetaSideData->size;
+        LocalFrame.HasDolbyVisionMetadata = 1;
+    }
+
     AVFrameSideData *HDR10PlusSideData = av_frame_get_side_data(Frame, AV_FRAME_DATA_DYNAMIC_HDR_PLUS);
     if (HDR10PlusSideData) {
         uint8_t *T35Buffer = nullptr;
@@ -1055,6 +1076,7 @@ int FFMS_VideoSource::Seek(int n) {
 
 void FFMS_VideoSource::Free() {
     av_freep(&RPUBuffer);
+    av_freep(&DoviMetaBuffer);
     av_freep(&HDR10PlusBuffer);
     avcodec_free_context(&CodecContext);
     avformat_close_input(&FormatContext);
