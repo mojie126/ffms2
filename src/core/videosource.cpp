@@ -98,6 +98,33 @@ FFMS_Frame *FFMS_VideoSource::OutputFrame(AVFrame *Frame) {
         }
     }
 
+    // 分层解码：将左右眼缓冲区数据输出到 LocalFrame
+    if (IsLayered) {
+        if ((PrimaryEyeIsLeft && !EyesInverted) || (!PrimaryEyeIsLeft && EyesInverted)) {
+            for (int i = 0; i < 4; i++) {
+                LocalFrame.Data[i] = LeftEyeFrameData[i];
+                LocalFrame.Linesize[i] = LeftEyeLinesize[i];
+            }
+        } else {
+            for (int i = 0; i < 4; i++) {
+                LocalFrame.Data[i] = RightEyeFrameData[i];
+                LocalFrame.Linesize[i] = RightEyeLinesize[i];
+            }
+        }
+        for (int i = 0; i < 4; i++) {
+            LocalFrame.LeftEyeData[i] = LeftEyeFrameData[i];
+            LocalFrame.LeftEyeLinesize[i] = LeftEyeLinesize[i];
+            LocalFrame.RightEyeData[i] = RightEyeFrameData[i];
+            LocalFrame.RightEyeLinesize[i] = RightEyeLinesize[i];
+        }
+        if (EyesInverted) {
+            for (int i = 0; i < 4; i++) {
+                std::swap(LocalFrame.RightEyeData[i], LocalFrame.LeftEyeData[i]);
+                std::swap(LocalFrame.RightEyeLinesize[i], LocalFrame.LeftEyeLinesize[i]);
+            }
+        }
+    }
+
     LocalFrame.EncodedWidth = Frame->width;
     LocalFrame.EncodedHeight = Frame->height;
     LocalFrame.EncodedPixelFormat = Frame->format;
@@ -408,6 +435,19 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         if (CodecContext->codec_id == AV_CODEC_ID_H264 && CodecContext->has_b_frames)
             CodecContext->has_b_frames = 15; // the maximum possible value for h264
 
+        // 检测是否为分层（立体3D）编码
+        if (FormatContext->streams[VideoTrack]->disposition & AV_DISPOSITION_MULTILAYER) {
+            IsLayered = true;
+            // 从 side data 判断主视角是左眼还是右眼
+            for (int i = 0; i < FormatContext->streams[VideoTrack]->codecpar->nb_coded_side_data; i++) {
+                if (FormatContext->streams[VideoTrack]->codecpar->coded_side_data[i].type == AV_PKT_DATA_STEREO3D) {
+                    const AVStereo3D *StereoSideData = (const AVStereo3D *)FormatContext->streams[VideoTrack]->codecpar->coded_side_data[i].data;
+                    PrimaryEyeIsLeft = !(StereoSideData->primary_eye == AV_PRIMARY_EYE_RIGHT);
+                    EyesInverted = !!(StereoSideData->flags & AV_STEREO3D_FLAG_INVERT);
+                }
+            }
+        }
+
         // 禁用 Dolby Vision RPU 像素变换，保留原始 Base Layer 像素
         // apply_dovi=0：解码器不做逐帧 RPU reshape，但仍输出 AV_FRAME_DATA_DOVI_METADATA
         // 避免解码器 reshape + 静态 LUT 双重映射导致的颜色跳变
@@ -417,6 +457,9 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         if (CodecContext->codec_id == AV_CODEC_ID_HEVC) {
             av_dict_set(&codec_opts, "apply_dovi", "0", 0);
         }
+        // 分层解码时请求所有视角
+        if (IsLayered)
+            av_dict_set(&codec_opts, "view_ids", "-1", 0);
 
         if (avcodec_open2(CodecContext, Codec, &codec_opts) < 0) {
             av_dict_free(&codec_opts);
@@ -935,9 +978,13 @@ void FFMS_VideoSource::SetVideoProperties() {
         VP.ColorRange = AVCOL_RANGE_JPEG;
 
 
-    VP.FirstTime = ((Frames[Frames.RealFrameNumber(0)].PTS * Frames.TB.Num) / (double)Frames.TB.Den) / 1000;
-    VP.LastTime = ((Frames[Frames.RealFrameNumber(Frames.VisibleFrameCount()-1)].PTS * Frames.TB.Num) / (double)Frames.TB.Den) / 1000;
-    VP.LastEndTime = (((Frames[Frames.RealFrameNumber(Frames.VisibleFrameCount()-1)].PTS + Frames.LastDuration) * Frames.TB.Num) / (double)Frames.TB.Den) / 1000;
+    // 提取关键 PTS，并新增 LastEndPTS 属性（原始 PTS 单位，不经时间基转换）
+    auto FirstPTS = Frames[Frames.RealFrameNumber(0)].PTS;
+    auto LastPTS = Frames[Frames.RealFrameNumber(Frames.VisibleFrameCount()-1)].PTS;
+    VP.LastEndPTS = LastPTS + Frames.LastDuration;
+    VP.FirstTime = ((FirstPTS * Frames.TB.Num) / (double)Frames.TB.Den) / 1000;
+    VP.LastTime = ((LastPTS * Frames.TB.Num) / (double)Frames.TB.Den) / 1000;
+    VP.LastEndTime = ((VP.LastEndPTS * Frames.TB.Num) / (double)Frames.TB.Den) / 1000;
 
     if (CodecContext->width <= 0 || CodecContext->height <= 0)
         throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
@@ -969,6 +1016,25 @@ bool FFMS_VideoSource::HasPendingDelayedFrames() {
         Stage = DecodeStage::DECODE_LOOP;
     }
     return false;
+}
+
+// 复制解码帧到分层解码的左/右眼缓冲区
+void FFMS_VideoSource::CopyEye(AVStereo3DView view) {
+    if (view == AV_STEREO3D_VIEW_LEFT) {
+        av_freep(&LeftEyeFrameData[0]);
+        if (av_image_alloc(LeftEyeFrameData, LeftEyeLinesize, DecodeFrame->width, DecodeFrame->height, (enum AVPixelFormat) DecodeFrame->format, 16) < 0)
+                throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED,
+                    "Could not allocate left eye buffer");
+        av_image_copy(LeftEyeFrameData, LeftEyeLinesize, DecodeFrame->data, DecodeFrame->linesize, (enum AVPixelFormat) DecodeFrame->format, DecodeFrame->width, DecodeFrame->height);
+    } else if (view == AV_STEREO3D_VIEW_RIGHT) {
+        av_freep(&RightEyeFrameData[0]);
+        if (av_image_alloc(RightEyeFrameData, RightEyeLinesize, DecodeFrame->width, DecodeFrame->height, (enum AVPixelFormat) DecodeFrame->format, 16) < 0)
+                throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED,
+                    "Could not allocate right eye buffer");
+        av_image_copy(RightEyeFrameData, RightEyeLinesize, DecodeFrame->data, DecodeFrame->linesize, (enum AVPixelFormat) DecodeFrame->format, DecodeFrame->width, DecodeFrame->height);
+    } else {
+        throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Layered decode with invalid view.");
+    }
 }
 
 bool FFMS_VideoSource::DecodePacket(AVPacket *Packet) {
@@ -1015,6 +1081,55 @@ bool FFMS_VideoSource::DecodePacket(AVPacket *Packet) {
                 }
             }
             av_frame_unref(HWDecodedFrame);
+        }
+        // 分层解码：接收第二个视角的帧并复制左右眼数据
+        if (IsLayered) {
+            const AVFrameSideData *sd = av_frame_get_side_data(DecodeFrame, AV_FRAME_DATA_STEREO3D);
+            if (!sd)
+                throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
+                    "Missing Stereo3D for layered decode.");
+
+            const AVStereo3D *stereo3d = (const AVStereo3D *)sd->data;
+            AVStereo3DView first_view = stereo3d->view;
+            CopyEye(stereo3d->view);
+
+            // 接收第二个视角
+            int Ret2;
+            if (using_hw_surface) {
+                Ret2 = avcodec_receive_frame(CodecContext, HWDecodedFrame);
+            } else {
+                Ret2 = avcodec_receive_frame(CodecContext, DecodeFrame);
+            }
+            if (Ret2 != 0)
+                throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
+                    "Missing second view for layered decode.");
+
+            if (using_hw_surface) {
+                av_frame_unref(DecodeFrame);
+                if (CodecContext->hw_device_ctx && HWDecodedFrame->format == hw_pix_fmt) {
+                    if (av_hwframe_transfer_data(DecodeFrame, HWDecodedFrame, 0) != 0)
+                        throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
+                            "Failed to transfer HW frame to system memory (second view).");
+                    av_frame_copy_props(DecodeFrame, HWDecodedFrame);
+                } else {
+                    if (av_frame_ref(DecodeFrame, HWDecodedFrame) < 0)
+                        throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED,
+                            "Could not reference decoded frame (second view).");
+                }
+                av_frame_unref(HWDecodedFrame);
+            }
+
+            sd = av_frame_get_side_data(DecodeFrame, AV_FRAME_DATA_STEREO3D);
+            if (!sd)
+                throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
+                    "Missing Stereo3D for layered decode second layer.");
+
+            stereo3d = (const AVStereo3D *)sd->data;
+            if ((first_view == AV_STEREO3D_VIEW_LEFT && stereo3d->view != AV_STEREO3D_VIEW_RIGHT) ||
+                (first_view == AV_STEREO3D_VIEW_RIGHT && stereo3d->view != AV_STEREO3D_VIEW_LEFT)) {
+                throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Unmatched left/right views in layered decode.");
+            }
+            CopyEye(stereo3d->view);
         }
         if (use_pad_filter) {
             // 向滤镜添加帧
@@ -1083,6 +1198,8 @@ void FFMS_VideoSource::Free() {
     if (SWS)
         sws_freeContext(SWS);
     av_freep(&SWSFrameData[0]);
+    av_freep(&LeftEyeFrameData[0]);
+    av_freep(&RightEyeFrameData[0]);
     av_frame_free(&DecodeFrame);
     av_frame_free(&LastDecodedFrame);
     av_frame_free(&HWDecodedFrame);
@@ -1171,12 +1288,8 @@ bool FFMS_VideoSource::SeekTo(int n, int SeekOffset) {
         // Seeking too close to the end of the stream can result in a different decoder delay since
         // frames are returned as soon as draining starts, so avoid this to keep the delay predictable.
         // Is the +1 necessary here? Not sure, but let's keep it to be safe.
-        int EndOfStreamDist = std::max(CodecContext->has_b_frames, Delay.ReorderDelay) + 1;
-
-        if (CodecContext->codec_id == AV_CODEC_ID_H264)
-            // Work around a bug in ffmpeg's h264 decoder where frames are skipped when seeking too
-            // close to the end in open-gop files: https://trac.ffmpeg.org/ticket/10936
-            EndOfStreamDist *= 2;
+        // 同时考虑重排序延迟和线程延迟，确保解码器延迟完整覆盖
+        int EndOfStreamDist = Delay.ReorderDelay + Delay.ThreadDelay + 1;
 
         TargetFrame = std::min(TargetFrame, Frames.RealFrameNumber(std::max(0, VP.NumFrames - 1 - EndOfStreamDist)));
 

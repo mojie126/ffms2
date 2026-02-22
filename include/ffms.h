@@ -351,6 +351,18 @@ typedef struct FFMS_Frame {
     uint8_t *DolbyVisionMetadata;
     int DolbyVisionMetadataSize;
     int HasDolbyVisionMetadata; /* 非零表示 DolbyVisionMetadata 有效 */
+
+    /*
+     * 分层解码（立体3D）左右眼缓冲区。
+     * 若非 NULL，则存在左右眼数据；主缓冲区指向主视角眼的数据，
+     * 供单目编码使用。
+     *
+     * Introduced in FFMS_VERSION ((5 << 24) | (1 << 16) | (0 << 8) | 0)
+     */
+    const uint8_t *LeftEyeData[4];
+    int LeftEyeLinesize[4];
+    const uint8_t *RightEyeData[4];
+    int RightEyeLinesize[4];
 } FFMS_Frame;
 
 typedef struct FFMS_TrackTimeBase {
@@ -408,6 +420,8 @@ typedef struct FFMS_VideoProperties {
     /* 流级Dolby Vision配置记录检测 */
     int HasDolbyVision;                /* Non-zero if DOVI configuration record found in stream */
     int DolbyVisionProfile;            /* Dolby Vision profile number (0 if unknown) */
+    /* 末尾帧的结束 PTS（原始时间基单位，不经秒转换） */
+    int64_t LastEndPTS;
 } FFMS_VideoProperties;
 
 typedef struct FFMS_AudioProperties {
