@@ -422,6 +422,10 @@ typedef struct FFMS_VideoProperties {
     int DolbyVisionProfile;            /* Dolby Vision profile number (0 if unknown) */
     /* 末尾帧的结束 PTS（原始时间基单位，不经秒转换） */
     int64_t LastEndPTS;
+    /* 硬件解码状态（用于区分“已请求”与“实际启用”） */
+    int HardwareDecodeRequested;       /* Non-zero if a HW decode path was requested/selected */
+    int HardwareDecodeActive;          /* Non-zero if decoder is actually running on HW decode path */
+    int HardwareDecodeDeviceType;      /* AVHWDeviceType value, AV_HWDEVICE_TYPE_NONE when inactive */
 } FFMS_VideoProperties;
 
 typedef struct FFMS_AudioProperties {

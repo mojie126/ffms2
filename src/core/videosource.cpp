@@ -370,6 +370,9 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             hw_name = nullptr;
         // HWType = getHwDeviceType(true);
         HWType = getHwDeviceType(hw_name);
+        VP.HardwareDecodeRequested = HWType != AV_HWDEVICE_TYPE_NONE;
+        VP.HardwareDecodeActive = 0;
+        VP.HardwareDecodeDeviceType = AV_HWDEVICE_TYPE_NONE;
         const AVCodec *Codec = getDecoder(FormatContext->streams[VideoTrack]->codecpar->codec_id, HWType);
         if (Codec == nullptr)
             throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Video codec not found");
@@ -427,6 +430,8 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         const std::string codec_name = Codec->name ? Codec->name : "";
         const bool using_cuvid_decoder = codec_name.find("_cuvid") != std::string::npos;
         const bool using_hwaccel_decode = CodecContext->hw_device_ctx != nullptr || using_cuvid_decoder;
+        VP.HardwareDecodeActive = using_hwaccel_decode ? 1 : 0;
+        VP.HardwareDecodeDeviceType = using_hwaccel_decode ? static_cast<int>(HWType) : static_cast<int>(AV_HWDEVICE_TYPE_NONE);
         // Hard decode paths are more sensitive to frame reordering and queue delay.
         // Keep them single-threaded to reduce latency jitter and potential mis-order.
         CodecContext->thread_count = using_hwaccel_decode ? 1 : DecodingThreads;
@@ -461,6 +466,12 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         if (IsLayered)
             av_dict_set(&codec_opts, "view_ids", "-1", 0);
 
+        // 保存 avcodec_open2 前的 has_b_frames，用于延迟计算。
+        // cuvid 解码器（h264_cuvid 等）在 open 后可能将 has_b_frames 重置为
+        // 较小值（因其内部处理 B 帧重排序），但 FFMS2 的 APPLY_DELAY 机制
+        // 仍需按原始管线深度跳过帧，否则会导致帧偏移。
+        const int pre_open_has_b_frames = CodecContext->has_b_frames;
+
         if (avcodec_open2(CodecContext, Codec, &codec_opts) < 0) {
             av_dict_free(&codec_opts);
             throw FFMS_Exception(
@@ -482,7 +493,9 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             Delay.ReorderDelay = CodecContext->delay;
         } else {
             // In theory we can move this to CodecContext->delay, sort of, one day, maybe. Not now.
-            Delay.ReorderDelay = std::max({CodecContext->has_b_frames, CodecContext->delay, Frames.MaxBFrames}); // Normal decoder delay
+            // 使用 pre_open_has_b_frames 确保 cuvid 解码器重置 has_b_frames 后
+            // 延迟计算不低于通用解码器路径（D3D11VA/DXVA2 使用的标准解码器）
+            Delay.ReorderDelay = std::max({CodecContext->has_b_frames, CodecContext->delay, Frames.MaxBFrames, pre_open_has_b_frames}); // Normal decoder delay
             if (CodecContext->active_thread_type & FF_THREAD_FRAME) // Adjust for frame based threading
                 Delay.ThreadDelay = CodecContext->thread_count - 1;
 
