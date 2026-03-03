@@ -1033,21 +1033,44 @@ bool FFMS_VideoSource::HasPendingDelayedFrames() {
 
 // 复制解码帧到分层解码的左/右眼缓冲区
 void FFMS_VideoSource::CopyEye(AVStereo3DView view) {
+    uint8_t **data;
+    int *linesize;
+
     if (view == AV_STEREO3D_VIEW_LEFT) {
-        av_freep(&LeftEyeFrameData[0]);
-        if (av_image_alloc(LeftEyeFrameData, LeftEyeLinesize, DecodeFrame->width, DecodeFrame->height, (enum AVPixelFormat) DecodeFrame->format, 16) < 0)
-                throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED,
-                    "Could not allocate left eye buffer");
-        av_image_copy(LeftEyeFrameData, LeftEyeLinesize, DecodeFrame->data, DecodeFrame->linesize, (enum AVPixelFormat) DecodeFrame->format, DecodeFrame->width, DecodeFrame->height);
+        data = LeftEyeFrameData;
+        linesize = LeftEyeLinesize;
     } else if (view == AV_STEREO3D_VIEW_RIGHT) {
-        av_freep(&RightEyeFrameData[0]);
-        if (av_image_alloc(RightEyeFrameData, RightEyeLinesize, DecodeFrame->width, DecodeFrame->height, (enum AVPixelFormat) DecodeFrame->format, 16) < 0)
-                throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED,
-                    "Could not allocate right eye buffer");
-        av_image_copy(RightEyeFrameData, RightEyeLinesize, DecodeFrame->data, DecodeFrame->linesize, (enum AVPixelFormat) DecodeFrame->format, DecodeFrame->width, DecodeFrame->height);
+        data = RightEyeFrameData;
+        linesize = RightEyeLinesize;
     } else {
         throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Layered decode with invalid view.");
     }
+
+    const bool dims_changed = (DecodeFrame->width != eye_buf_width ||
+                               DecodeFrame->height != eye_buf_height ||
+                               static_cast<AVPixelFormat>(DecodeFrame->format) != eye_buf_fmt);
+
+    // 尺寸/格式变化时释放双眼缓冲区（对端将在下次CopyEye调用时重新分配）
+    if (dims_changed) {
+        av_freep(&LeftEyeFrameData[0]);
+        av_freep(&RightEyeFrameData[0]);
+        eye_buf_width = DecodeFrame->width;
+        eye_buf_height = DecodeFrame->height;
+        eye_buf_fmt = static_cast<AVPixelFormat>(DecodeFrame->format);
+    }
+
+    // 仅在缓冲区未分配时才分配（尺寸不变则复用已有缓冲区）
+    if (!data[0]) {
+        if (av_image_alloc(data, linesize, DecodeFrame->width, DecodeFrame->height,
+                           static_cast<AVPixelFormat>(DecodeFrame->format), 16) < 0)
+            throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED,
+                "Could not allocate eye buffer");
+    }
+
+    av_image_copy(data, linesize,
+                  DecodeFrame->data, DecodeFrame->linesize,
+                  static_cast<AVPixelFormat>(DecodeFrame->format),
+                  DecodeFrame->width, DecodeFrame->height);
 }
 
 bool FFMS_VideoSource::DecodePacket(AVPacket *Packet) {
@@ -1303,6 +1326,9 @@ bool FFMS_VideoSource::SeekTo(int n, int SeekOffset) {
         // Is the +1 necessary here? Not sure, but let's keep it to be safe.
         // 同时考虑重排序延迟和线程延迟，确保解码器延迟完整覆盖
         int EndOfStreamDist = Delay.ReorderDelay + Delay.ThreadDelay + 1;
+        // H264 open-GOP文件可能需要更大的安全裕量（参见 trac.ffmpeg.org/ticket/10936）
+        if (CodecContext->codec_id == AV_CODEC_ID_H264)
+            EndOfStreamDist = std::max(EndOfStreamDist, (CodecContext->has_b_frames + 1) * 2);
 
         TargetFrame = std::min(TargetFrame, Frames.RealFrameNumber(std::max(0, VP.NumFrames - 1 - EndOfStreamDist)));
 

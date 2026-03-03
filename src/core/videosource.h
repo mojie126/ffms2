@@ -103,6 +103,10 @@ private:
     int LeftEyeLinesize[4] = {};
     uint8_t *RightEyeFrameData[4] = {};
     int RightEyeLinesize[4] = {};
+    /// 眼缓冲区当前尺寸/格式（用于避免每帧重分配）
+    int eye_buf_width = 0;
+    int eye_buf_height = 0;
+    AVPixelFormat eye_buf_fmt = AV_PIX_FMT_NONE;
 
     AVPacket *StashedPacket = nullptr;
     bool ResendPacket = false;
