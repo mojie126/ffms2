@@ -1,5 +1,8 @@
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <memory>
 #include <string>
 #include <random>
 #include <vector>
@@ -63,7 +66,11 @@ void IndexerTest::SetUp() {
     VP = nullptr;
     E.Buffer = ErrorMsg;
     E.BufferSize = sizeof(ErrorMsg);
-    SamplesDir = STRINGIFY(SAMPLES_DIR);
+    const char *SamplesDirEnv = std::getenv("FFMS2_SAMPLES_DIR");
+    if (SamplesDirEnv && SamplesDirEnv[0] != '\0')
+        SamplesDir = SamplesDirEnv;
+    else
+        SamplesDir = STRINGIFY(SAMPLES_DIR);
 
     FFMS_Init(0,0);
 }
@@ -84,7 +91,7 @@ bool IndexerTest::DoIndexing(std::string file_name) {
     video_track_idx = FFMS_GetFirstTrackOfType(index, FFMS_TYPE_VIDEO, &E);
     EXPECT_GE(0, video_track_idx);
 
-    video_source = FFMS_CreateVideoSource(file_name.c_str(), video_track_idx, index, 1, FFMS_SEEK_NORMAL, &E);
+    video_source = FFMS_CreateVideoSource(file_name.c_str(), video_track_idx, index, 1, FFMS_SEEK_NORMAL, &E, "none", 0);
     NULL_CHECK(video_source);
 
     VP = FFMS_GetVideoProperties(video_source); // Can't fail
@@ -95,6 +102,8 @@ bool IndexerTest::DoIndexing(std::string file_name) {
 TEST_P(IndexerTest, ValidateFrameCount) {
     TestDataMap P = GetParam();
     std::string FilePath = SamplesDir + "/" + P.Filename;
+    if (!std::filesystem::exists(FilePath))
+        GTEST_SKIP() << "Missing sample file: " << FilePath << ". Set FFMS2_SAMPLES_DIR to run this test.";
 
     ASSERT_TRUE(DoIndexing(FilePath));
 
@@ -104,6 +113,8 @@ TEST_P(IndexerTest, ValidateFrameCount) {
 TEST_P(IndexerTest, ReverseAccessingFrame) {
     TestDataMap P = GetParam();
     std::string FilePath = SamplesDir + "/" + P.Filename;
+    if (!std::filesystem::exists(FilePath))
+        GTEST_SKIP() << "Missing sample file: " << FilePath << ". Set FFMS2_SAMPLES_DIR to run this test.";
 
     ASSERT_TRUE(DoIndexing(FilePath));
     for (int i = VP->NumFrames - 1; i > 0; i--) {
@@ -123,6 +134,8 @@ TEST_P(IndexerTest, ReverseAccessingFrame) {
 TEST_P(IndexerTest, RandomAccessingFrame) {
     TestDataMap P = GetParam();
     std::string FilePath = SamplesDir + "/" + P.Filename;
+    if (!std::filesystem::exists(FilePath))
+        GTEST_SKIP() << "Missing sample file: " << FilePath << ". Set FFMS2_SAMPLES_DIR to run this test.";
 
     ASSERT_TRUE(DoIndexing(FilePath));
 
@@ -149,6 +162,83 @@ TEST_P(IndexerTest, RandomAccessingFrame) {
         ASSERT_NE(nullptr, frame);
         ASSERT_TRUE(CheckFrame(frame, info, &P.TestData[num]));
     }
+}
+
+TEST_P(IndexerTest, HardwareDecoderSeekConsistency) {
+    TestDataMap P = GetParam();
+    std::string FilePath = SamplesDir + "/" + P.Filename;
+    if (!std::filesystem::exists(FilePath))
+        GTEST_SKIP() << "Missing sample file: " << FilePath << ". Set FFMS2_SAMPLES_DIR to run this test.";
+
+    ASSERT_TRUE(DoIndexing(FilePath));
+    FFMS_Track *track = FFMS_GetTrackFromIndex(index, video_track_idx);
+    ASSERT_NE(nullptr, track);
+
+    std::vector<int> probe_frames = {0};
+    if (VP->NumFrames > 2)
+        probe_frames.push_back(VP->NumFrames / 2);
+    if (VP->NumFrames > 1)
+        probe_frames.push_back(VP->NumFrames - 1);
+    std::sort(probe_frames.begin(), probe_frames.end());
+    probe_frames.erase(std::unique(probe_frames.begin(), probe_frames.end()), probe_frames.end());
+
+    const char *hw_candidates[] = { "cuda", "d3d11va", "dxva2" };
+    bool has_active_hw = false;
+    for (const char *hw_name : hw_candidates) {
+        FFMS_ErrorInfo hw_err;
+        char hw_error_msg[1024];
+        hw_err.Buffer = hw_error_msg;
+        hw_err.BufferSize = sizeof(hw_error_msg);
+        hw_err.ErrorType = FFMS_ERROR_SUCCESS;
+        hw_err.SubType = FFMS_ERROR_SUCCESS;
+
+        std::unique_ptr<FFMS_VideoSource, decltype(&FFMS_DestroyVideoSource)> hw_source(
+            FFMS_CreateVideoSource(FilePath.c_str(), video_track_idx, index, 1, FFMS_SEEK_NORMAL, &hw_err, hw_name, 0),
+            FFMS_DestroyVideoSource
+        );
+        if (!hw_source)
+            continue;
+
+        const FFMS_VideoProperties *hw_vp = FFMS_GetVideoProperties(hw_source.get());
+        ASSERT_NE(nullptr, hw_vp);
+        if (!hw_vp->HardwareDecodeActive)
+            continue;
+
+        has_active_hw = true;
+        for (int frame_num : probe_frames) {
+            std::stringstream ss;
+            ss << "HW=" << hw_name << ", Frame=" << frame_num;
+            SCOPED_TRACE(ss.str());
+
+            const FFMS_FrameInfo *info = FFMS_GetFrameInfo(track, frame_num);
+            ASSERT_NE(nullptr, info);
+
+            const FFMS_Frame *sw_frame = FFMS_GetFrame(video_source, frame_num, &E);
+            ASSERT_NE(nullptr, sw_frame);
+
+            FFMS_ErrorInfo hw_frame_err;
+            char hw_frame_error_msg[1024];
+            hw_frame_err.Buffer = hw_frame_error_msg;
+            hw_frame_err.BufferSize = sizeof(hw_frame_error_msg);
+            hw_frame_err.ErrorType = FFMS_ERROR_SUCCESS;
+            hw_frame_err.SubType = FFMS_ERROR_SUCCESS;
+
+            const FFMS_Frame *hw_frame = FFMS_GetFrame(hw_source.get(), frame_num, &hw_frame_err);
+            ASSERT_NE(nullptr, hw_frame);
+
+            // The same frame number should map to identical frame role metadata.
+            EXPECT_EQ(hw_frame->KeyFrame, sw_frame->KeyFrame);
+            EXPECT_EQ(hw_frame->RepeatPict, sw_frame->RepeatPict);
+            EXPECT_EQ(hw_frame->PictType, sw_frame->PictType);
+            EXPECT_EQ(hw_frame->EncodedWidth, sw_frame->EncodedWidth);
+            EXPECT_EQ(hw_frame->EncodedHeight, sw_frame->EncodedHeight);
+            EXPECT_EQ(hw_frame->KeyFrame, info->KeyFrame);
+            EXPECT_EQ(hw_frame->RepeatPict, info->RepeatPict);
+        }
+    }
+
+    if (!has_active_hw)
+        GTEST_SKIP() << "No active hardware decoder path available on this machine.";
 }
 
 INSTANTIATE_TEST_CASE_P(ValidateIndexer, IndexerTest, ::testing::ValuesIn(TestFiles));

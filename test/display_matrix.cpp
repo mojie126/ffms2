@@ -58,7 +58,7 @@ bool DisplayMatrixTest::DoIndexing(std::string file_name) {
     video_track_idx = FFMS_GetFirstTrackOfType(index, FFMS_TYPE_VIDEO, &E);
     EXPECT_GE(0, video_track_idx);
 
-    video_source = FFMS_CreateVideoSource(file_name.c_str(), video_track_idx, index, 1, FFMS_SEEK_NORMAL, &E);
+    video_source = FFMS_CreateVideoSource(file_name.c_str(), video_track_idx, index, 1, FFMS_SEEK_NORMAL, &E, "none", 0);
     NULL_CHECK(video_source);
 
     VP = FFMS_GetVideoProperties(video_source); // Can't fail
