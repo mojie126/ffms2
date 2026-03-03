@@ -432,9 +432,10 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         const bool using_hwaccel_decode = CodecContext->hw_device_ctx != nullptr || using_cuvid_decoder;
         VP.HardwareDecodeActive = using_hwaccel_decode ? 1 : 0;
         VP.HardwareDecodeDeviceType = using_hwaccel_decode ? static_cast<int>(HWType) : static_cast<int>(AV_HWDEVICE_TYPE_NONE);
-        // Hard decode paths are more sensitive to frame reordering and queue delay.
-        // Keep them single-threaded to reduce latency jitter and potential mis-order.
-        CodecContext->thread_count = using_hwaccel_decode ? 1 : DecodingThreads;
+        // CUVID 专用解码器内部自带帧重排序管线，需单线程避免帧序混乱；
+        // D3D11VA/DXVA2 使用标准解码器 + hwaccel，解码行为与软件一致，
+        // 可多线程（slice 级并行），FFmpeg 会根据 hwaccel 约束自动决定线程模型。
+        CodecContext->thread_count = using_cuvid_decoder ? 1 : DecodingThreads;
         CodecContext->has_b_frames = Frames.MaxBFrames;
         // Full explanation by more clever person availale here: https://github.com/Nevcairiel/LAVFilters/issues/113
         if (CodecContext->codec_id == AV_CODEC_ID_H264 && CodecContext->has_b_frames)
@@ -499,15 +500,13 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             if (CodecContext->active_thread_type & FF_THREAD_FRAME) // Adjust for frame based threading
                 Delay.ThreadDelay = CodecContext->thread_count - 1;
 
-            // 硬件解码（含 D3D11VA/DXVA2/cuvid）以单线程运行（ThreadDelay=0），
-            // 所有 Increment 直接累加到 ReorderDelayCounter。
-            // 多线程解码时 ThreadDelayCounter 吸收了大部分 Increment，
-            // ReorderDelayCounter 保持较低；单线程解码时全部累加到
-            // ReorderDelayCounter，首帧解码后 ReorderDC ≈ has_b_frames+2，
-            // 超过原始 ReorderDelay=has_b_frames 阈值，
-            // APPLY_DELAY 阶段 IsExceeded() 误判并跳过帧。
-            // +2 确保 ReorderDC（≈has_b_frames+2）不超过阈值（strict >）。
-            if (using_hwaccel_decode)
+            // CUVID 专用解码器（h264_cuvid 等）内部自带 B 帧重排序管线，
+            // 额外缓冲约 2 帧。单线程运行（ThreadDelay=0）使所有
+            // Increment 直接累加到 ReorderDelayCounter，需 +2 补偿
+            // 以防止 APPLY_DELAY 阶段 IsExceeded() 误判跳帧。
+            // D3D11VA/DXVA2 使用标准解码器 + hwaccel，管线深度与软件解码
+            // 一致，保持多线程且不额外补偿，确保帧对齐与软件路径相同。
+            if (using_cuvid_decoder)
                 Delay.ReorderDelay += 2;
         }
 
