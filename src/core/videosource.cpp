@@ -500,10 +500,10 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             if (CodecContext->active_thread_type & FF_THREAD_FRAME) // Adjust for frame based threading
                 Delay.ThreadDelay = CodecContext->thread_count - 1;
 
-            // CUVID 专用解码器（h264_cuvid 等）内部自带 B 帧重排序管线，
-            // 额外缓冲约 2 帧。单线程运行（ThreadDelay=0）使所有
-            // Increment 直接累加到 ReorderDelayCounter，需 +2 补偿
-            // 以防止 APPLY_DELAY 阶段 IsExceeded() 误判跳帧。
+            // CUVID 专用解码器（h264_cuvid 等）GPU 管线额外缓冲约 2 帧，
+            // 单线程（ThreadDelay=0）使 Increment 全部累加到
+            // ReorderDelayCounter，不补偿则 IsExceeded() 过早满足，
+            // 产生多余幻影迭代导致帧偏移。
             // D3D11VA/DXVA2 使用标准解码器 + hwaccel，管线深度与软件解码
             // 一致，保持多线程且不额外补偿，确保帧对齐与软件路径相同。
             if (using_cuvid_decoder)
@@ -1072,7 +1072,7 @@ void FFMS_VideoSource::CopyEye(AVStereo3DView view) {
                   DecodeFrame->width, DecodeFrame->height);
 }
 
-bool FFMS_VideoSource::DecodePacket(AVPacket *Packet) {
+bool FFMS_VideoSource::DecodePacket(AVPacket *Packet, bool skip_hw_transfer) {
     std::swap(DecodeFrame, LastDecodedFrame);
     ResendPacket = false;
 
@@ -1095,95 +1095,102 @@ bool FFMS_VideoSource::DecodePacket(AVPacket *Packet) {
         Ret = avcodec_receive_frame(CodecContext, DecodeFrame);
     }
     if (Ret == 0) {
-        if (using_hw_surface) {
-            av_frame_unref(DecodeFrame);
-            if (CodecContext->hw_device_ctx && HWDecodedFrame->format == hw_pix_fmt) {
-                // 硬件帧需要复制到 CPU 内存供后续处理
-                if (av_hwframe_transfer_data(DecodeFrame, HWDecodedFrame, 0) != 0) {
-                    throw FFMS_Exception(
-                        FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
-                        "Failed to transfer HW frame to system memory."
-                    );
-                }
-                av_frame_copy_props(DecodeFrame, HWDecodedFrame);
-            } else {
-                // 某些情况下解码器会返回软件帧，直接引用避免输出旧帧
-                if (av_frame_ref(DecodeFrame, HWDecodedFrame) < 0) {
-                    throw FFMS_Exception(
-                        FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED,
-                        "Could not reference decoded frame."
-                    );
-                }
-            }
-            av_frame_unref(HWDecodedFrame);
-        }
-        // 分层解码：接收第二个视角的帧并复制左右眼数据
-        if (IsLayered) {
-            const AVFrameSideData *sd = av_frame_get_side_data(DecodeFrame, AV_FRAME_DATA_STEREO3D);
-            if (!sd)
-                throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
-                    "Missing Stereo3D for layered decode.");
-
-            const AVStereo3D *stereo3d = (const AVStereo3D *)sd->data;
-            AVStereo3DView first_view = stereo3d->view;
-            CopyEye(stereo3d->view);
-
-            // 接收第二个视角
-            int Ret2;
-            if (using_hw_surface) {
-                Ret2 = avcodec_receive_frame(CodecContext, HWDecodedFrame);
-            } else {
-                Ret2 = avcodec_receive_frame(CodecContext, DecodeFrame);
-            }
-            if (Ret2 != 0)
-                throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
-                    "Missing second view for layered decode.");
-
+        // 硬件解码 seek 优化：非分层编码中间帧跳过 GPU→CPU 传输，
+        // 减少 PCIe 往返开销。HWDecodedFrame 保留 GPU surface 引用，
+        // 下次 avcodec_receive_frame 自动释放回 surface 池。
+        if (using_hw_surface && skip_hw_transfer && !IsLayered) {
+            // 仅排空解码器输出，不执行传输和后处理
+        } else {
             if (using_hw_surface) {
                 av_frame_unref(DecodeFrame);
                 if (CodecContext->hw_device_ctx && HWDecodedFrame->format == hw_pix_fmt) {
-                    if (av_hwframe_transfer_data(DecodeFrame, HWDecodedFrame, 0) != 0)
-                        throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
-                            "Failed to transfer HW frame to system memory (second view).");
+                    // 硬件帧需要复制到 CPU 内存供后续处理
+                    if (av_hwframe_transfer_data(DecodeFrame, HWDecodedFrame, 0) != 0) {
+                        throw FFMS_Exception(
+                            FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
+                            "Failed to transfer HW frame to system memory."
+                        );
+                    }
                     av_frame_copy_props(DecodeFrame, HWDecodedFrame);
                 } else {
-                    if (av_frame_ref(DecodeFrame, HWDecodedFrame) < 0)
-                        throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED,
-                            "Could not reference decoded frame (second view).");
+                    // 某些情况下解码器会返回软件帧，直接引用避免输出旧帧
+                    if (av_frame_ref(DecodeFrame, HWDecodedFrame) < 0) {
+                        throw FFMS_Exception(
+                            FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED,
+                            "Could not reference decoded frame."
+                        );
+                    }
                 }
                 av_frame_unref(HWDecodedFrame);
             }
+            // 分层解码：接收第二个视角的帧并复制左右眼数据
+            if (IsLayered) {
+                const AVFrameSideData *sd = av_frame_get_side_data(DecodeFrame, AV_FRAME_DATA_STEREO3D);
+                if (!sd)
+                    throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
+                        "Missing Stereo3D for layered decode.");
 
-            sd = av_frame_get_side_data(DecodeFrame, AV_FRAME_DATA_STEREO3D);
-            if (!sd)
-                throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
-                    "Missing Stereo3D for layered decode second layer.");
+                const AVStereo3D *stereo3d = (const AVStereo3D *)sd->data;
+                AVStereo3DView first_view = stereo3d->view;
+                CopyEye(stereo3d->view);
 
-            stereo3d = (const AVStereo3D *)sd->data;
-            if ((first_view == AV_STEREO3D_VIEW_LEFT && stereo3d->view != AV_STEREO3D_VIEW_RIGHT) ||
-                (first_view == AV_STEREO3D_VIEW_RIGHT && stereo3d->view != AV_STEREO3D_VIEW_LEFT)) {
-                throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Unmatched left/right views in layered decode.");
+                // 接收第二个视角
+                int Ret2;
+                if (using_hw_surface) {
+                    Ret2 = avcodec_receive_frame(CodecContext, HWDecodedFrame);
+                } else {
+                    Ret2 = avcodec_receive_frame(CodecContext, DecodeFrame);
+                }
+                if (Ret2 != 0)
+                    throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
+                        "Missing second view for layered decode.");
+
+                if (using_hw_surface) {
+                    av_frame_unref(DecodeFrame);
+                    if (CodecContext->hw_device_ctx && HWDecodedFrame->format == hw_pix_fmt) {
+                        if (av_hwframe_transfer_data(DecodeFrame, HWDecodedFrame, 0) != 0)
+                            throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
+                                "Failed to transfer HW frame to system memory (second view).");
+                        av_frame_copy_props(DecodeFrame, HWDecodedFrame);
+                    } else {
+                        if (av_frame_ref(DecodeFrame, HWDecodedFrame) < 0)
+                            throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED,
+                                "Could not reference decoded frame (second view).");
+                    }
+                    av_frame_unref(HWDecodedFrame);
+                }
+
+                sd = av_frame_get_side_data(DecodeFrame, AV_FRAME_DATA_STEREO3D);
+                if (!sd)
+                    throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
+                        "Missing Stereo3D for layered decode second layer.");
+
+                stereo3d = (const AVStereo3D *)sd->data;
+                if ((first_view == AV_STEREO3D_VIEW_LEFT && stereo3d->view != AV_STEREO3D_VIEW_RIGHT) ||
+                    (first_view == AV_STEREO3D_VIEW_RIGHT && stereo3d->view != AV_STEREO3D_VIEW_LEFT)) {
+                    throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC, "Unmatched left/right views in layered decode.");
+                }
+                CopyEye(stereo3d->view);
             }
-            CopyEye(stereo3d->view);
-        }
-        if (use_pad_filter) {
-            // 向滤镜添加帧
-            if (av_buffersrc_add_frame_flags(buffersrc_ctx, DecodeFrame, AV_BUFFERSRC_FLAG_KEEP_REF) < 0) {
-                throw FFMS_Exception(
-                    FFMS_ERROR_FILTER, FFMS_ERROR_FILTER,
-                    "Failed to add frame to filter graph."
-                );
+            if (use_pad_filter) {
+                // 向滤镜添加帧
+                if (av_buffersrc_add_frame_flags(buffersrc_ctx, DecodeFrame, AV_BUFFERSRC_FLAG_KEEP_REF) < 0) {
+                    throw FFMS_Exception(
+                        FFMS_ERROR_FILTER, FFMS_ERROR_FILTER,
+                        "Failed to add frame to filter graph."
+                    );
+                }
+                // 取出经过滤镜的帧
+                av_frame_unref(padded_frame);
+                if (av_buffersink_get_frame(buffersink_ctx, padded_frame) < 0) {
+                    throw FFMS_Exception(
+                        FFMS_ERROR_FILTER, FFMS_ERROR_FILTER,
+                        "Failed to get frame from filter graph."
+                    );
+                }
+                av_frame_unref(DecodeFrame);
+                av_frame_move_ref(DecodeFrame, padded_frame);
             }
-            // 取出经过滤镜的帧
-            av_frame_unref(padded_frame);
-            if (av_buffersink_get_frame(buffersink_ctx, padded_frame) < 0) {
-                throw FFMS_Exception(
-                    FFMS_ERROR_FILTER, FFMS_ERROR_FILTER,
-                    "Failed to get frame from filter graph."
-                );
-            }
-            av_frame_unref(DecodeFrame);
-            av_frame_move_ref(DecodeFrame, padded_frame);
         }
         Delay.Decrement();
     } else
@@ -1246,7 +1253,7 @@ void FFMS_VideoSource::Free() {
     use_pad_filter = false;
 }
 
-void FFMS_VideoSource::DecodeNextFrame(int64_t &AStartTime, int64_t &Pos) {
+void FFMS_VideoSource::DecodeNextFrame(int64_t &AStartTime, int64_t &Pos, bool skip_hw_transfer) {
     AStartTime = -1;
 
     if (HasPendingDelayedFrames())
@@ -1280,7 +1287,7 @@ void FFMS_VideoSource::DecodeNextFrame(int64_t &AStartTime, int64_t &Pos) {
         if (Pos < 0)
             Pos = Packet->pos;
 
-        bool FrameFinished = DecodePacket(Packet);
+        bool FrameFinished = DecodePacket(Packet, skip_hw_transfer);
         if (ResendPacket)
             av_packet_ref(StashedPacket, Packet);
         av_packet_unref(Packet);
@@ -1302,7 +1309,7 @@ void FFMS_VideoSource::DecodeNextFrame(int64_t &AStartTime, int64_t &Pos) {
             "Failed to read packet: " + AVErrorToString(ret));
 
     // Flush final frames
-    DecodePacket(Packet);
+    DecodePacket(Packet, skip_hw_transfer);
     av_packet_free(&Packet);
 }
 
@@ -1363,6 +1370,10 @@ FFMS_Frame *FFMS_VideoSource::GetFrame(int n) {
     bool Seek = true;
     bool WasSkipped = false;
 
+    // 硬件解码 seek 优化：循环中所有中间帧跳过 GPU→CPU 传输，
+    // 循环结束后对目标帧执行一次传输。分层编码不适用此优化。
+    const bool use_hw_skip = CodecContext->hw_device_ctx != nullptr && !IsLayered;
+
     do {
         bool HasSeeked = false;
         if (Seek) {
@@ -1377,7 +1388,7 @@ FFMS_Frame *FFMS_VideoSource::GetFrame(int n) {
             if (WasSkipped)
                 WasSkipped = false;
             else
-                DecodeNextFrame(StartTime, FilePos);
+                DecodeNextFrame(StartTime, FilePos, use_hw_skip);
         }
 
         if (!HasSeeked)
@@ -1444,6 +1455,34 @@ FFMS_Frame *FFMS_VideoSource::GetFrame(int n) {
             WasSkipped = true;
         }
     } while (++CurrentFrame <= n);
+
+    // 硬件解码 seek 优化：对循环结束后的目标帧执行一次 GPU→CPU 传输
+    if (use_hw_skip) {
+        av_frame_unref(DecodeFrame);
+        if (HWDecodedFrame->format == hw_pix_fmt) {
+            if (av_hwframe_transfer_data(DecodeFrame, HWDecodedFrame, 0) != 0)
+                throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_CODEC,
+                    "Failed to transfer HW frame to system memory.");
+            av_frame_copy_props(DecodeFrame, HWDecodedFrame);
+        } else {
+            if (av_frame_ref(DecodeFrame, HWDecodedFrame) < 0)
+                throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED,
+                    "Could not reference decoded frame.");
+        }
+        av_frame_unref(HWDecodedFrame);
+
+        if (use_pad_filter) {
+            if (av_buffersrc_add_frame_flags(buffersrc_ctx, DecodeFrame, AV_BUFFERSRC_FLAG_KEEP_REF) < 0)
+                throw FFMS_Exception(FFMS_ERROR_FILTER, FFMS_ERROR_FILTER,
+                    "Failed to add frame to filter graph.");
+            av_frame_unref(padded_frame);
+            if (av_buffersink_get_frame(buffersink_ctx, padded_frame) < 0)
+                throw FFMS_Exception(FFMS_ERROR_FILTER, FFMS_ERROR_FILTER,
+                    "Failed to get frame from filter graph.");
+            av_frame_unref(DecodeFrame);
+            av_frame_move_ref(DecodeFrame, padded_frame);
+        }
+    }
 
     LastFrameNum = n;
     return OutputFrame(DecodeFrame);
