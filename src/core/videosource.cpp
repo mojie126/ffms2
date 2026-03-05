@@ -22,9 +22,8 @@
 #include "indexing.h"
 #include "videoutils.h"
 #include <algorithm>
-#include <iostream>
-#include <fstream>
 #include <thread>
+#include <cstdio>
 
 void DecoderDelay::Reset() {
     ThreadDelayCounter = 0;
@@ -365,11 +364,11 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
 
         LAVFOpenFile(SourceFile, FormatContext, VideoTrack, Index.LAVFOpts);
 
-        // 初始化硬件
+        // 初始化硬件：hw_name="none" 表示纯软件解码，不进入自动检测
         if (hw_name && strcmp(hw_name, "none") == 0)
-            hw_name = nullptr;
-        // HWType = getHwDeviceType(true);
-        HWType = getHwDeviceType(hw_name);
+            HWType = AV_HWDEVICE_TYPE_NONE;
+        else
+            HWType = getHwDeviceType(hw_name);
         VP.HardwareDecodeRequested = HWType != AV_HWDEVICE_TYPE_NONE;
         VP.HardwareDecodeActive = 0;
         VP.HardwareDecodeDeviceType = AV_HWDEVICE_TYPE_NONE;
@@ -500,14 +499,11 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
             if (CodecContext->active_thread_type & FF_THREAD_FRAME) // Adjust for frame based threading
                 Delay.ThreadDelay = CodecContext->thread_count - 1;
 
-            // CUVID 专用解码器（h264_cuvid 等）GPU 管线额外缓冲约 2 帧，
-            // 单线程（ThreadDelay=0）使 Increment 全部累加到
-            // ReorderDelayCounter，不补偿则 IsExceeded() 过早满足，
-            // 产生多余幻影迭代导致帧偏移。
-            // D3D11VA/DXVA2 使用标准解码器 + hwaccel，管线深度与软件解码
-            // 一致，保持多线程且不额外补偿，确保帧对齐与软件路径相同。
-            if (using_cuvid_decoder)
-                Delay.ReorderDelay += 2;
+            // 静态延迟估算基于编解码器参数（has_b_frames、MaxBFrames 等），
+            // 但某些解码器（如 CUVID 专用解码器）的实际管线深度可能超出静态估计。
+            // 动态修正在 DecodePacket 的 INITIALIZE→APPLY_DELAY 转换处执行：
+            // 根据首帧解码后 ReorderDelayCounter 的实际值上调 ReorderDelay，
+            // 确保 IsExceeded() 不会因管线深度低估而过早触发幻影帧。
         }
 
         SeekByPos = !strcmp(FormatContext->iformat->name, "mpeg") || !strcmp(FormatContext->iformat->name, "mpegts") || !strcmp(FormatContext->iformat->name, "mpegtsraw");
@@ -1196,8 +1192,14 @@ bool FFMS_VideoSource::DecodePacket(AVPacket *Packet, bool skip_hw_transfer) {
     } else
         std::swap(DecodeFrame, LastDecodedFrame);
 
-    if (Ret == 0 && Stage == DecodeStage::INITIALIZE)
+    if (Ret == 0 && Stage == DecodeStage::INITIALIZE) {
         Stage = DecodeStage::APPLY_DELAY;
+        // 动态修正重排序延迟：首帧解码后 ReorderDelayCounter 反映解码器
+        // 实际管线深度，若超出静态估计则上调 ReorderDelay，防止
+        // IsExceeded() 因低估而产生多余幻影帧导致帧偏移。
+        if (Delay.ReorderDelayCounter > Delay.ReorderDelay)
+            Delay.ReorderDelay = Delay.ReorderDelayCounter;
+    }
 
     return Ret == 0;
 }
