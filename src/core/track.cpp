@@ -25,6 +25,7 @@
 #include "indexing.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 
@@ -155,6 +156,68 @@ void FFMS_Track::WriteTimecodes(const char *TimecodeFile) const {
 
 static bool PTSComparison(FrameInfo FI1, FrameInfo FI2) {
     return FI1.PTS < FI2.PTS;
+}
+
+enum class AVPacketProp {
+    TS,
+    Pos,
+    Hidden,
+    Key,
+};
+
+const std::array<std::vector<AVPacketProp>, 5> FindPacketCheckSequence = {{
+    {AVPacketProp::TS, AVPacketProp::Pos, AVPacketProp::Hidden, AVPacketProp::Key},
+    {AVPacketProp::TS, AVPacketProp::Pos, AVPacketProp::Hidden},
+    {AVPacketProp::TS, AVPacketProp::Pos},
+    {AVPacketProp::TS},
+    {AVPacketProp::Pos},
+}};
+
+int FFMS_Track::FindPacket(const AVPacket &packet) const {
+    FrameInfo F;
+    F.PTS = UseDTS ? packet.dts : packet.pts;
+
+    auto SameTSRange = std::equal_range(begin(), end(), F, PTSComparison);
+
+    for (auto const& checks : FindPacketCheckSequence) {
+        auto Begin = begin();
+        auto End = end();
+
+        if (checks[0] == AVPacketProp::TS) {
+            Begin = SameTSRange.first;
+            End = SameTSRange.second;
+        }
+
+        int found = 0;
+        int result = -1;
+
+        for (auto it = Begin; it < End; ++it) {
+            bool match = std::all_of(checks.cbegin(), checks.cend(), [&](AVPacketProp check) {
+                switch (check) {
+                    case AVPacketProp::TS:
+                        return it->PTS == F.PTS;
+                    case AVPacketProp::Pos:
+                        return it->FilePos == packet.pos;
+                    case AVPacketProp::Hidden:
+                        return it->MarkedHidden == !!(packet.flags & AV_PKT_FLAG_DISCARD);
+                    case AVPacketProp::Key:
+                        return it->KeyFrame == !!(packet.flags & AV_PKT_FLAG_KEY);
+                }
+
+                return false;
+            });
+
+            if (match) {
+                found++;
+                result = std::distance(begin(), it);
+            }
+        }
+
+        if (found == 1)
+            return result;
+    }
+
+    return -1;
 }
 
 int FFMS_Track::FrameFromPTS(int64_t PTS, bool AllowHidden) const {
