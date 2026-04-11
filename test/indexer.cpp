@@ -10,6 +10,12 @@
 #include <ffms.h>
 #include <gtest/gtest.h>
 
+extern "C" {
+#include <libavcodec/packet.h>
+}
+
+#include "../src/core/track.h"
+
 #include "data/test.mp4.cpp"
 #include "data/vp9_audfirst.webm.cpp"
 #include "data/qrvideo_24fps_1elist_1ctts.mov.cpp"
@@ -97,6 +103,60 @@ bool IndexerTest::DoIndexing(std::string file_name) {
     VP = FFMS_GetVideoProperties(video_source); // Can't fail
 
     return true;
+}
+
+TEST(FFMSTrackTest, FindPacket_PrefersFullMatch) {
+    FFMS_Track track(1, 1000, FFMS_TYPE_VIDEO, false, false);
+    track.AddVideoFrame(100, 100, 0, true, 0, 10, false, false);
+    track.AddVideoFrame(100, 100, 0, false, 0, 20, true, false);
+
+    AVPacket packet{};
+    packet.pts = 100;
+    packet.dts = 100;
+    packet.pos = 20;
+    packet.flags = AV_PKT_FLAG_DISCARD;
+
+    EXPECT_EQ(1, track.FindPacket(packet));
+}
+
+TEST(FFMSTrackTest, FindPacket_FallsBackWithoutKey) {
+    FFMS_Track track(1, 1000, FFMS_TYPE_VIDEO, false, false);
+    track.AddVideoFrame(100, 100, 0, true, 0, 10, false, false);
+
+    AVPacket packet{};
+    packet.pts = 100;
+    packet.dts = 100;
+    packet.pos = 10;
+    packet.flags = 0;
+
+    EXPECT_EQ(0, track.FindPacket(packet));
+}
+
+TEST(FFMSTrackTest, FindPacket_UsesDTSWhenConfigured) {
+    FFMS_Track track(1, 1000, FFMS_TYPE_VIDEO, false, true);
+    track.AddVideoFrame(200, 200, 0, false, 0, 33, false, false);
+
+    AVPacket packet{};
+    packet.pts = 999;
+    packet.dts = 200;
+    packet.pos = 33;
+    packet.flags = 0;
+
+    EXPECT_EQ(0, track.FindPacket(packet));
+}
+
+TEST(FFMSTrackTest, FindPacket_AmbiguousReturnsMinusOne) {
+    FFMS_Track track(1, 1000, FFMS_TYPE_VIDEO, false, false);
+    track.AddVideoFrame(100, 100, 0, false, 0, 10, false, false);
+    track.AddVideoFrame(100, 100, 0, false, 0, 10, false, false);
+
+    AVPacket packet{};
+    packet.pts = 100;
+    packet.dts = 100;
+    packet.pos = 10;
+    packet.flags = 0;
+
+    EXPECT_EQ(-1, track.FindPacket(packet));
 }
 
 TEST_P(IndexerTest, ValidateFrameCount) {
