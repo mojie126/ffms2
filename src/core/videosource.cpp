@@ -346,12 +346,11 @@ FFMS_VideoSource::FFMS_VideoSource(const char *SourceFile, FFMS_Index &Index, in
         LastDecodedFrame = av_frame_alloc();
         HWDecodedFrame = av_frame_alloc();
         padded_frame = av_frame_alloc();
-        StashedPacket = av_packet_alloc();
 
-        if (!DecodeFrame || !LastDecodedFrame || !HWDecodedFrame || !padded_frame || !StashedPacket) {
+        if (!DecodeFrame || !LastDecodedFrame || !HWDecodedFrame || !padded_frame) {
             throw FFMS_Exception(
                 FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED,
-                "Could not allocate dummy frame / stashed packet."
+                "Could not allocate dummy frame."
             );
         }
 
@@ -1068,15 +1067,15 @@ void FFMS_VideoSource::CopyEye(AVStereo3DView view) {
                   DecodeFrame->width, DecodeFrame->height);
 }
 
-bool FFMS_VideoSource::DecodePacket(AVPacket *Packet, bool skip_hw_transfer) {
+bool FFMS_VideoSource::DecodePacket(const AVPacket &Packet, bool skip_hw_transfer) {
     std::swap(DecodeFrame, LastDecodedFrame);
     ResendPacket = false;
 
-    int PacketNum = Frames.FrameFromPTS(Frames.UseDTS ? Packet->dts : Packet->pts, true);
-    bool PacketHidden = !!(Packet->flags & AV_PKT_FLAG_DISCARD) || (PacketNum != -1 && Frames[PacketNum].MarkedHidden);
+    int PacketNum = Frames.FindPacket(Packet);
+    bool PacketHidden = !!(Packet.flags & AV_PKT_FLAG_DISCARD) || (PacketNum != -1 && Frames[PacketNum].MarkedHidden);
     bool SecondField = PacketNum != -1 && Frames[PacketNum].SecondField;
 
-    int Ret = avcodec_send_packet(CodecContext, Packet);
+    int Ret = avcodec_send_packet(CodecContext, &Packet);
     if (Ret == AVERROR(EAGAIN)) {
         // Send queue is full, so stash packet to resend on the next call.
         ResendPacket = true;
@@ -1224,7 +1223,7 @@ int FFMS_VideoSource::Seek(int n) {
     // We always assume seeking is possible if the first seek succeeds
     avcodec_flush_buffers(CodecContext);
     ResendPacket = false;
-    av_packet_unref(StashedPacket);
+    av_packet_unref(StashedPacket.get());
 
     // When it's 0 we always know what the next frame is (or more exactly should be)
     if (n == 0)
@@ -1248,40 +1247,41 @@ void FFMS_VideoSource::Free() {
     av_frame_free(&LastDecodedFrame);
     av_frame_free(&HWDecodedFrame);
     av_frame_free(&padded_frame);
-    av_packet_free(&StashedPacket);
+    av_packet_unref(StashedPacket.get());
     avfilter_graph_free(&filter_graph);
     av_buffer_unref(&hw_device_ctx);
     hw_pix_fmt = AV_PIX_FMT_NONE;
     use_pad_filter = false;
 }
 
-void FFMS_VideoSource::DecodeNextFrame(int64_t &AStartTime, int64_t &Pos, bool skip_hw_transfer) {
+SmartAVPacket FFMS_VideoSource::DecodeNextFrame(int64_t &AStartTime, int64_t &Pos, bool skip_hw_transfer) {
     AStartTime = -1;
+    SmartAVPacket FirstPacket;
 
     if (HasPendingDelayedFrames())
-        return;
+        return FirstPacket;
 
-    AVPacket *Packet = av_packet_alloc();
-    if (!Packet)
-        throw FFMS_Exception(FFMS_ERROR_DECODING, FFMS_ERROR_ALLOCATION_FAILED,
-            "Could not allocate packet.");
+    SmartAVPacket Packet;
 
     int ret;
     if (ResendPacket) {
         // If we have a packet previously stashed due to a full input queue,
         // send it again.
         ret = 0;
-        av_packet_ref(Packet, StashedPacket);
-        av_packet_unref(StashedPacket);
+        av_packet_ref(Packet.get(), StashedPacket.get());
+        av_packet_unref(StashedPacket.get());
     } else {
-        ret = av_read_frame(FormatContext, Packet);
+        ret = av_read_frame(FormatContext, Packet.get());
     }
     while (ret >= 0) {
         if (Packet->stream_index != VideoTrack) {
-            av_packet_unref(Packet);
-            ret = av_read_frame(FormatContext, Packet);
+            av_packet_unref(Packet.get());
+            ret = av_read_frame(FormatContext, Packet.get());
             continue;
         }
+
+        if (FirstPacket->data == nullptr)
+            av_packet_ref(FirstPacket.get(), Packet.get());
 
         if (AStartTime < 0)
             AStartTime = Frames.UseDTS ? Packet->dts : Packet->pts;
@@ -1289,21 +1289,20 @@ void FFMS_VideoSource::DecodeNextFrame(int64_t &AStartTime, int64_t &Pos, bool s
         if (Pos < 0)
             Pos = Packet->pos;
 
-        bool FrameFinished = DecodePacket(Packet, skip_hw_transfer);
+        bool FrameFinished = DecodePacket(*Packet, skip_hw_transfer);
         if (ResendPacket)
-            av_packet_ref(StashedPacket, Packet);
-        av_packet_unref(Packet);
+            av_packet_ref(StashedPacket.get(), Packet.get());
+        av_packet_unref(Packet.get());
         if (FrameFinished) {
-            av_packet_free(&Packet);
-            return;
+            return FirstPacket;
         }
 
         if (ResendPacket) {
             ret = 0;
-            av_packet_ref(Packet, StashedPacket);
-            av_packet_unref(StashedPacket);
+            av_packet_ref(Packet.get(), StashedPacket.get());
+            av_packet_unref(StashedPacket.get());
         } else {
-            ret = av_read_frame(FormatContext, Packet);
+            ret = av_read_frame(FormatContext, Packet.get());
         }
     }
     if (IsIOError(ret))
@@ -1311,8 +1310,9 @@ void FFMS_VideoSource::DecodeNextFrame(int64_t &AStartTime, int64_t &Pos, bool s
             "Failed to read packet: " + AVErrorToString(ret));
 
     // Flush final frames
-    DecodePacket(Packet, skip_hw_transfer);
-    av_packet_free(&Packet);
+    av_packet_unref(Packet.get());
+    DecodePacket(*Packet, skip_hw_transfer);
+    return FirstPacket;
 }
 
 bool FFMS_VideoSource::SeekTo(int n, int SeekOffset) {
@@ -1384,19 +1384,22 @@ FFMS_Frame *FFMS_VideoSource::GetFrame(int n) {
             WasSkipped = false;
         }
 
+        SmartAVPacket FirstPacket;
         int64_t StartTime = AV_NOPTS_VALUE, FilePos = -1;
         bool Skipped = (((unsigned) CurrentFrame < Frames.size()) && Frames[CurrentFrame].Skipped());
         if (HasSeeked || !Skipped) {
             if (WasSkipped)
                 WasSkipped = false;
             else
-                DecodeNextFrame(StartTime, FilePos, use_hw_skip);
+                FirstPacket = DecodeNextFrame(StartTime, FilePos, use_hw_skip);
         }
 
         if (!HasSeeked)
             continue;
 
-        if (StartTime == AV_NOPTS_VALUE && !Frames.HasTS) {
+        CurrentFrame = FirstPacket->data == nullptr ? -1 : Frames.FindPacket(*FirstPacket);
+
+        if (CurrentFrame < 0 && StartTime == AV_NOPTS_VALUE && !Frames.HasTS) {
             if (FilePos >= 0) {
                 CurrentFrame = Frames.FrameFromPos(FilePos);
                 if (CurrentFrame >= 0)
@@ -1410,8 +1413,6 @@ FFMS_Frame *FFMS_VideoSource::GetFrame(int n) {
                 continue;
             }
         }
-
-        CurrentFrame = Frames.FrameFromPTS(StartTime);
 
         // Is the seek destination time known? Does it belong to a frame?
         if (CurrentFrame < 0) {

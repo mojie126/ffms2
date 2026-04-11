@@ -108,7 +108,7 @@ private:
     int eye_buf_height = 0;
     AVPixelFormat eye_buf_fmt = AV_PIX_FMT_NONE;
 
-    AVPacket *StashedPacket = nullptr;
+    SmartAVPacket StashedPacket;
     bool ResendPacket = false;
 
     void DetectInputFormat();
@@ -155,8 +155,8 @@ private:
     void ReAdjustOutputFormat(AVFrame *Frame);
     FFMS_Frame *OutputFrame(AVFrame *Frame);
     void SetVideoProperties();
-    bool DecodePacket(AVPacket *Packet, bool skip_hw_transfer = false);
-    void DecodeNextFrame(int64_t &PTS, int64_t &Pos, bool skip_hw_transfer = false);
+    bool DecodePacket(const AVPacket &Packet, bool skip_hw_transfer = false);
+    SmartAVPacket DecodeNextFrame(int64_t &PTS, int64_t &Pos, bool skip_hw_transfer = false);
     bool SeekTo(int n, int SeekOffset);
     int Seek(int n);
     void Free();
