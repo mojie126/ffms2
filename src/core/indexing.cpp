@@ -422,17 +422,36 @@ const char *FFMS_Indexer::GetFormatName() {
     return FormatContext->iformat->name;
 }
 
+AVStream *FFMS_Indexer::GetTrackStream(int Track) const {
+    if (!FormatContext || Track < 0 || Track >= static_cast<int>(FormatContext->nb_streams))
+        return nullptr;
+    return FormatContext->streams[Track];
+}
+
 FFMS_TrackType FFMS_Indexer::GetTrackType(int Track) {
-    return static_cast<FFMS_TrackType>(FormatContext->streams[Track]->codecpar->codec_type);
+    AVStream *stream = GetTrackStream(Track);
+    if (!stream)
+        return FFMS_TYPE_UNKNOWN;
+    return static_cast<FFMS_TrackType>(stream->codecpar->codec_type);
 }
 
 const char *FFMS_Indexer::GetTrackCodec(int Track) {
-    auto *codec = avcodec_find_decoder(FormatContext->streams[Track]->codecpar->codec_id);
+    AVStream *stream = GetTrackStream(Track);
+    if (!stream)
+        return nullptr;
+
+    auto *codec = avcodec_find_decoder(stream->codecpar->codec_id);
     return codec ? codec->name : nullptr;
 }
 
 const char *FFMS_Indexer::GetTrackMetadata(int Track, const char *Key) {
-    AVStream *stream = FormatContext->streams[Track];
+    if (!Key || !*Key)
+        return nullptr;
+
+    AVStream *stream = GetTrackStream(Track);
+    if (!stream)
+        return nullptr;
+
     AVDictionaryEntry *Entry = av_dict_get(stream->metadata, Key, nullptr, 0);
     return Entry ? Entry->value : nullptr;
 }

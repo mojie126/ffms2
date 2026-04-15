@@ -86,6 +86,7 @@ private:
     void CheckAudioProperties(int Track, AVCodecContext *Context);
     uint32_t IndexAudioPacket(int Track, const AVPacket &Packet, SharedAVContext &Context, FFMS_Index &TrackIndices);
     void ParseVideoPacket(SharedAVContext &VideoContext, const AVPacket &pkt, int *RepeatPict, int *FrameType, bool *Invisible, bool *SecondField, enum AVPictureStructure *LastPicStruct);
+    AVStream *GetTrackStream(int Track) const;
     void Free();
 public:
     FFMS_Indexer(const char *Filename, const FFMS_KeyValuePair *DemuxerOptions, int NumOptions);

@@ -1,7 +1,11 @@
 #include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <random>
@@ -44,6 +48,73 @@ const TestDataMap TestFiles[] = {
     TEST_ENTRY("qrvideo_24fps_3elist_1ctts.mov", qrvideo_24fps_3elist_1ctts),
     TEST_ENTRY("qrvideo_24fps_elist_starts_ctts_2ndsample.mov", qrvideo_24fps_elist_starts_ctts_2ndsample),
     TEST_ENTRY("qrvideo_stream_shorter_than_movie.mov", qrvideo_stream_shorter_than_movie),
+};
+
+void WriteLE16(std::ofstream &out, uint16_t value) {
+    const std::array<char, 2> bytes = {
+        static_cast<char>(value & 0xFF),
+        static_cast<char>((value >> 8) & 0xFF),
+    };
+    out.write(bytes.data(), bytes.size());
+}
+
+void WriteLE32(std::ofstream &out, uint32_t value) {
+    const std::array<char, 4> bytes = {
+        static_cast<char>(value & 0xFF),
+        static_cast<char>((value >> 8) & 0xFF),
+        static_cast<char>((value >> 16) & 0xFF),
+        static_cast<char>((value >> 24) & 0xFF),
+    };
+    out.write(bytes.data(), bytes.size());
+}
+
+std::filesystem::path CreateTempWaveFile() {
+    const auto unique_stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path path = std::filesystem::temp_directory_path()
+        / ("ffms2-indexer-api-" + std::to_string(unique_stamp) + ".wav");
+
+    std::ofstream out(path, std::ios::binary);
+    EXPECT_TRUE(out.is_open());
+
+    const std::array<uint8_t, 16> samples = {
+        128, 128, 128, 128, 128, 128, 128, 128,
+        128, 128, 128, 128, 128, 128, 128, 128,
+    };
+    const uint16_t channels = 1;
+    const uint32_t sample_rate = 8000;
+    const uint16_t bits_per_sample = 8;
+    const uint16_t block_align = channels * bits_per_sample / 8;
+    const uint32_t byte_rate = sample_rate * block_align;
+    const uint32_t data_size = static_cast<uint32_t>(samples.size());
+
+    out.write("RIFF", 4);
+    WriteLE32(out, 36 + data_size);
+    out.write("WAVE", 4);
+    out.write("fmt ", 4);
+    WriteLE32(out, 16);
+    WriteLE16(out, 1);
+    WriteLE16(out, channels);
+    WriteLE32(out, sample_rate);
+    WriteLE32(out, byte_rate);
+    WriteLE16(out, block_align);
+    WriteLE16(out, bits_per_sample);
+    out.write("data", 4);
+    WriteLE32(out, data_size);
+    out.write(reinterpret_cast<const char *>(samples.data()), samples.size());
+    out.close();
+
+    EXPECT_TRUE(std::filesystem::exists(path));
+    return path;
+}
+
+struct TempFileGuard {
+    explicit TempFileGuard(std::filesystem::path path) : path(std::move(path)) {}
+    ~TempFileGuard() {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+    }
+
+    std::filesystem::path path;
 };
 
 class IndexerTest : public ::testing::TestWithParam<TestDataMap> {
@@ -157,6 +228,33 @@ TEST(FFMSTrackTest, FindPacket_AmbiguousReturnsMinusOne) {
     packet.flags = 0;
 
     EXPECT_EQ(-1, track.FindPacket(packet));
+}
+
+TEST(FFMSIndexerApiTest, InvalidTrackAndNullMetadataKeyReturnNullishResults) {
+    TempFileGuard temp_file(CreateTempWaveFile());
+
+    FFMS_ErrorInfo error_info{};
+    char error_msg[1024] = {};
+    error_info.Buffer = error_msg;
+    error_info.BufferSize = sizeof(error_msg);
+
+    std::unique_ptr<FFMS_Indexer, decltype(&FFMS_CancelIndexing)> indexer(
+        FFMS_CreateIndexer(temp_file.path.string().c_str(), &error_info),
+        FFMS_CancelIndexing
+    );
+    ASSERT_NE(nullptr, indexer);
+
+    EXPECT_EQ(FFMS_TYPE_AUDIO, FFMS_GetTrackTypeI(indexer.get(), 0));
+    EXPECT_NE(nullptr, FFMS_GetCodecNameI(indexer.get(), 0));
+
+    EXPECT_EQ(FFMS_TYPE_UNKNOWN, FFMS_GetTrackTypeI(indexer.get(), -1));
+    EXPECT_EQ(FFMS_TYPE_UNKNOWN, FFMS_GetTrackTypeI(indexer.get(), 99));
+    EXPECT_EQ(nullptr, FFMS_GetCodecNameI(indexer.get(), -1));
+    EXPECT_EQ(nullptr, FFMS_GetCodecNameI(indexer.get(), 99));
+    EXPECT_EQ(nullptr, FFMS_GetTrackMetadataI(indexer.get(), -1, "title"));
+    EXPECT_EQ(nullptr, FFMS_GetTrackMetadataI(indexer.get(), 99, "title"));
+    EXPECT_EQ(nullptr, FFMS_GetTrackMetadataI(indexer.get(), 0, nullptr));
+    EXPECT_EQ(nullptr, FFMS_GetTrackMetadataI(indexer.get(), 0, ""));
 }
 
 TEST_P(IndexerTest, ValidateFrameCount) {
