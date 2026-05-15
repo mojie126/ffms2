@@ -182,6 +182,7 @@ TEST(FFMSTrackTest, FindPacket_PrefersFullMatch) {
     track.AddVideoFrame(100, 100, 0, false, 0, 20, true, false);
 
     AVPacket packet{};
+    packet.data = (uint8_t *)"";
     packet.pts = 100;
     packet.dts = 100;
     packet.pos = 20;
@@ -195,6 +196,7 @@ TEST(FFMSTrackTest, FindPacket_FallsBackWithoutKey) {
     track.AddVideoFrame(100, 100, 0, true, 0, 10, false, false);
 
     AVPacket packet{};
+    packet.data = (uint8_t *)"";
     packet.pts = 100;
     packet.dts = 100;
     packet.pos = 10;
@@ -208,6 +210,7 @@ TEST(FFMSTrackTest, FindPacket_UsesDTSWhenConfigured) {
     track.AddVideoFrame(200, 200, 0, false, 0, 33, false, false);
 
     AVPacket packet{};
+    packet.data = (uint8_t *)"";
     packet.pts = 999;
     packet.dts = 200;
     packet.pos = 33;
@@ -222,6 +225,7 @@ TEST(FFMSTrackTest, FindPacket_AmbiguousReturnsMinusOne) {
     track.AddVideoFrame(100, 100, 0, false, 0, 10, false, false);
 
     AVPacket packet{};
+    packet.data = (uint8_t *)"";
     packet.pts = 100;
     packet.dts = 100;
     packet.pos = 10;
